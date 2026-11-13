@@ -120,6 +120,42 @@ fn builder_matches_nft() {
                     .build(),
             ),
             (
+                "meta mark 1-256 accept",
+                rb().match_range(Field::Mark, 1u32, 256u32)
+                    .accept()
+                    .build(),
+            ),
+            (
+                "ct mark 1-256 accept",
+                rb().match_range(Field::CtMark, 1u32, 256u32)
+                    .accept()
+                    .build(),
+            ),
+            (
+                "ip saddr 0.0.0.0/0 accept",
+                rb().match_prefix(Field::IpSaddr, Ipv4Addr::UNSPECIFIED, 0)
+                    .accept()
+                    .build(),
+            ),
+            (
+                "ip6 saddr ::/0 accept",
+                rb().match_prefix(Field::Ip6Saddr, std::net::Ipv6Addr::UNSPECIFIED, 0)
+                    .accept()
+                    .build(),
+            ),
+            (
+                "ip saddr 128.0.0.0/1 accept",
+                rb().match_prefix(Field::IpSaddr, Ipv4Addr::new(128, 0, 0, 0), 1)
+                    .accept()
+                    .build(),
+            ),
+            (
+                "ip6 saddr ::1/128 accept",
+                rb().match_prefix(Field::Ip6Saddr, std::net::Ipv6Addr::LOCALHOST, 128)
+                    .accept()
+                    .build(),
+            ),
+            (
                 "meta mark 0x00000007 accept",
                 rb().match_eq(Field::Mark, 7u32).accept().build(),
             ),

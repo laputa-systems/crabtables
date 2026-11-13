@@ -520,10 +520,27 @@ impl RuleBuilder {
         let mut v = value.into_value(&field);
         let family = self.rule.family;
         self = self.dep(field.dep(family));
-        let ordered = !matches!(op, CmpOp::Eq | CmpOp::Neq);
-        let len = field.len();
-        if ordered && field.host_order() && matches!(len, 2 | 4 | 8) {
-            self.rule.exprs.push(field.load(Reg::R1));
+        if matches!(op, CmpOp::Eq | CmpOp::Neq) {
+            return self.cmp_field(&field, op, v);
+        }
+        self = self.load_ordered(&field);
+        v = ordered_value(&field, v);
+        self.rule.exprs.push(Expr::Cmp(Cmp {
+            sreg: Reg::R1,
+            op,
+            data: v,
+        }));
+        self
+    }
+
+    /// Load `field` into [`Reg::R1`] so that byte-wise ordered comparisons
+    /// follow numeric order: multi-byte host byte order registers are
+    /// converted to network byte order. Bounds must pass through
+    /// [`ordered_value`].
+    fn load_ordered(mut self, field: &Field) -> Self {
+        self.rule.exprs.push(field.load(Reg::R1));
+        if converts_for_order(field) {
+            let len = field.len();
             self.rule.exprs.push(Expr::Byteorder(Byteorder {
                 sreg: Reg::R1,
                 dreg: Reg::R1,
@@ -531,17 +548,8 @@ impl RuleBuilder {
                 len,
                 size: len,
             }));
-            if cfg!(target_endian = "little") {
-                v.reverse();
-            }
-            self.rule.exprs.push(Expr::Cmp(Cmp {
-                sreg: Reg::R1,
-                op,
-                data: v,
-            }));
-            return self;
         }
-        self.cmp_field(&field, op, v)
+        self
     }
 
     /// Match `field & mask == value` (`ct mark and 0xff == 0x1`).
@@ -598,11 +606,14 @@ impl RuleBuilder {
     }
 
     /// Match an inclusive range `lo <= field <= hi` (`tcp dport 1000-2000`).
+    /// Multi-byte host byte order fields (`meta mark 1-256`) are converted
+    /// to network byte order first, as nft does.
     pub fn match_range(mut self, field: Field, lo: impl IntoValue, hi: impl IntoValue) -> Self {
         let (lo, hi) = (lo.into_value(&field), hi.into_value(&field));
+        let (lo, hi) = (ordered_value(&field, lo), ordered_value(&field, hi));
         let family = self.rule.family;
         self = self.dep(field.dep(family));
-        self.rule.exprs.push(field.load(Reg::R1));
+        self = self.load_ordered(&field);
         self.rule.exprs.push(Expr::Range(Range {
             sreg: Reg::R1,
             op: RangeOp::Eq,
@@ -613,13 +624,14 @@ impl RuleBuilder {
     }
 
     /// Match the network prefix of an address field (`ip saddr 10.0.0.0/8`).
+    /// A zero-length prefix matches every address of the field's family.
     pub fn match_prefix(mut self, field: Field, addr: impl IntoValue, prefix_len: u32) -> Self {
         let addr = addr.into_value(&field);
         let family = self.rule.family;
         self = self.dep(field.dep(family));
         let full = field.len();
         let bits = prefix_len.min(full * 8);
-        if bits % 8 == 0 {
+        if bits != 0 && bits % 8 == 0 {
             // Byte aligned: load only the prefix bytes (as nft does).
             let n = bits / 8;
             let load = match field.load(Reg::R1) {
@@ -1120,6 +1132,17 @@ pub fn limit_expr(rate: u64, per: Duration, burst: u32, ty: LimitType, over: boo
         ty,
         flags: if over { NFT_LIMIT_F_INV } else { 0 },
     }
+}
+
+fn converts_for_order(field: &Field) -> bool {
+    field.host_order() && matches!(field.len(), 2 | 4 | 8)
+}
+
+fn ordered_value(field: &Field, mut v: Vec<u8>) -> Vec<u8> {
+    if cfg!(target_endian = "little") && converts_for_order(field) {
+        v.reverse();
+    }
+    v
 }
 
 fn prefix_mask(len: u32, bits: u32) -> Vec<u8> {

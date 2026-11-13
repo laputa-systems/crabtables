@@ -1,6 +1,7 @@
 //! Functional tests: real packets over loopback, verified via counters.
 mod common;
-use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream, UdpSocket};
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use common::*;
@@ -459,4 +460,177 @@ fn set_element_counters_and_meters() {
     // 127.0.0.4: 2 within burst, 8 over; 127.0.0.5: within.
     assert_eq!(counter_of(&mut s, "out", "over"), 8);
     assert_eq!(s.list_elems(F, "t", "m").unwrap().len(), 2);
+}
+
+/// Send one UDP datagram per `(source address, packet mark)` to `dst:port`
+/// from a fresh socket (so each is a new flow) and return the indexes of
+/// those that were delivered, in arrival order.
+fn delivered(dst: IpAddr, port: u16, sends: &[(IpAddr, u32)]) -> Vec<usize> {
+    let rx = UdpSocket::bind((dst, port)).unwrap();
+    rx.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    for (i, (src, mark)) in sends.iter().enumerate() {
+        let tx = UdpSocket::bind((*src, 0)).unwrap();
+        let r = unsafe {
+            libc::setsockopt(
+                tx.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                (mark as *const u32).cast(),
+                4,
+            )
+        };
+        assert_eq!(r, 0, "SO_MARK: {}", std::io::Error::last_os_error());
+        if let Err(e) = tx.send_to(&(i as u32).to_be_bytes(), (dst, port)) {
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+        }
+    }
+    let mut got = Vec::new();
+    let mut buf = [0u8; 8];
+    while let Ok((n, _)) = rx.recv_from(&mut buf) {
+        assert_eq!(n, 4);
+        got.push(u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize);
+    }
+    got
+}
+
+fn assert_delivered(got: Vec<usize>, sends_len: usize, dropped: impl Fn(usize) -> bool, what: &str) {
+    let mut got = got;
+    got.sort_unstable();
+    let want: Vec<usize> = (0..sends_len).filter(|&i| !dropped(i)).collect();
+    assert_eq!(got, want, "{what}");
+}
+
+/// A range drop rule on a host byte order field must act on the numeric
+/// interval: both endpoints are dropped, their neighbours are delivered.
+fn host_order_range_drops(field: Field, ct: bool) {
+    netns();
+    let mut s = Socket::new().unwrap();
+    base(&mut s);
+    let cases: [(u16, u32, u32, &[u32]); 4] = [
+        (5100, 1, 256, &[0, 1, 2, 255, 256, 257, 0x1_0000, 0x100_0000]),
+        (
+            5101,
+            0xfffe,
+            0x1_0001,
+            &[0xfffd, 0xfffe, 0xffff, 0x1_0000, 0x1_0001, 0x1_0002, 1],
+        ),
+        (
+            5102,
+            0xff_ffff,
+            0x100_0001,
+            &[0xff_fffe, 0xff_ffff, 0x100_0000, 0x100_0001, 0x100_0002],
+        ),
+        (
+            5103,
+            0x7fff_fffe,
+            0x8000_0001,
+            &[0, 0x7fff_fffd, 0x7fff_fffe, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0x8000_0002, u32::MAX],
+        ),
+    ];
+    let mut b = Batch::new();
+    for (port, lo, hi, _) in cases {
+        if ct {
+            b.add_rule(
+                &RuleBuilder::new(F, "t", "out")
+                    .match_eq(Field::UdpDport, port)
+                    .ct_set_from(CtKey::Mark, Field::Mark)
+                    .build(),
+            );
+        }
+        b.add_rule(
+            &RuleBuilder::new(F, "t", "out")
+                .match_eq(Field::UdpDport, port)
+                .match_range(field, lo, hi)
+                .drop()
+                .build(),
+        );
+    }
+    s.commit(&b).unwrap();
+    let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    for (port, from, to, marks) in cases {
+        let sends: Vec<(IpAddr, u32)> = marks.iter().map(|&m| (lo, m)).collect();
+        let got = delivered(lo, port, &sends);
+        assert!(got.len() < sends.len(), "port {port}: nothing was dropped");
+        assert_delivered(
+            got,
+            sends.len(),
+            |i| (from..=to).contains(&marks[i]),
+            &format!("{field:?} range {from:#x}-{to:#x}"),
+        );
+    }
+}
+
+#[test]
+fn mark_range_compares_numeric_interval() {
+    host_order_range_drops(Field::Mark, false);
+}
+
+#[test]
+fn ct_mark_range_compares_numeric_interval() {
+    host_order_range_drops(Field::CtMark, true);
+}
+
+#[test]
+fn zero_length_prefix_matches_its_family() {
+    netns();
+    let mut s = Socket::new().unwrap();
+    base(&mut s);
+    let v4: [u8; 4] = [0; 4];
+    let v6 = Ipv6Addr::UNSPECIFIED;
+    let mut b = Batch::new();
+    for (port, rule) in [
+        (5200u16, RuleBuilder::new(F, "t", "out").match_prefix(Field::IpSaddr, v4, 0)),
+        (5201, RuleBuilder::new(F, "t", "out").match_prefix(Field::Ip6Saddr, v6, 0)),
+        (5202, RuleBuilder::new(F, "t", "out").match_prefix(Field::IpSaddr, v4, 1)),
+        (
+            5203,
+            RuleBuilder::new(F, "t", "out").match_prefix(Field::IpSaddr, [128, 0, 0, 0], 1),
+        ),
+        (
+            5204,
+            RuleBuilder::new(F, "t", "out").match_prefix(Field::IpSaddr, [127, 0, 0, 2], 32),
+        ),
+        (
+            5205,
+            RuleBuilder::new(F, "t", "out").match_prefix(Field::Ip6Saddr, Ipv6Addr::LOCALHOST, 128),
+        ),
+        (
+            5206,
+            RuleBuilder::new(F, "t", "out").match_prefix(
+                Field::Ip6Saddr,
+                Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0),
+                1,
+            ),
+        ),
+        (
+            5207,
+            RuleBuilder::new(F, "t", "out").match_prefix(Field::Ip6Saddr, Ipv6Addr::UNSPECIFIED, 1),
+        ),
+    ] {
+        b.add_rule(&rule.match_eq(Field::UdpDport, port).drop().build());
+    }
+    s.commit(&b).unwrap();
+
+    let a4 = |d: u8| IpAddr::V4(Ipv4Addr::new(127, 0, 0, d));
+    let a6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let lo4 = a4(1);
+    // Per port: sources of IPv4 then IPv6 traffic, and which are dropped.
+    let v4_srcs = [a4(1), a4(2)];
+    let check = |port: u16, dst: IpAddr, srcs: &[IpAddr], dropped: &[bool], what: &str| {
+        let sends: Vec<(IpAddr, u32)> = srcs.iter().map(|&a| (a, 0)).collect();
+        let got = delivered(dst, port, &sends);
+        assert_delivered(got, sends.len(), |i| dropped[i], what);
+    };
+    check(5200, lo4, &v4_srcs, &[true, true], "ip saddr 0.0.0.0/0 drops IPv4");
+    check(5200, a6, &[a6], &[false], "ip saddr 0.0.0.0/0 spares IPv6");
+    check(5201, a6, &[a6], &[true], "ip6 saddr ::/0 drops IPv6");
+    check(5201, lo4, &v4_srcs, &[false, false], "ip6 saddr ::/0 spares IPv4");
+    check(5202, lo4, &v4_srcs, &[true, true], "ip saddr 0.0.0.0/1");
+    check(5203, lo4, &v4_srcs, &[false, false], "ip saddr 128.0.0.0/1");
+    check(5204, lo4, &v4_srcs, &[false, true], "ip saddr 127.0.0.2/32");
+    check(5205, a6, &[a6], &[true], "ip6 saddr ::1/128");
+    check(5205, lo4, &v4_srcs, &[false, false], "ip6 saddr ::1/128 spares IPv4");
+    check(5206, a6, &[a6], &[false], "ip6 saddr 8000::/1");
+    check(5207, a6, &[a6], &[true], "ip6 saddr ::/1");
 }
