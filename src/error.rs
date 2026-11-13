@@ -18,6 +18,14 @@ pub enum Error {
     /// The kernel rejected one or more messages of a batch; the whole batch
     /// was rolled back.
     Batch(BatchError),
+    /// The responses to a batch could not establish whether it was applied.
+    ///
+    /// The batch may have been committed in full or not at all. This is
+    /// neither success nor a rejection: do not assume that the ruleset is
+    /// unchanged or that retrying is safe. Re-read the ruleset (or use
+    /// [`Batch::with_genid`](crate::Batch::with_genid) and idempotent
+    /// operations) before deciding. See [`OutcomeUnknown`].
+    OutcomeUnknown(OutcomeUnknown),
     /// Received data could not be parsed.
     Malformed(Cow<'static, str>),
     /// An attribute or message exceeded the netlink length limits.
@@ -38,7 +46,9 @@ impl Error {
     }
 
     /// The (positive) errno of a kernel or socket error, if any. For batch
-    /// errors this is the errno of the first failing message.
+    /// errors this is the errno of the first failing message. An
+    /// [unknown outcome](Error::OutcomeUnknown) has none: use
+    /// [`OutcomeUnknown::cause`] for the transport failure.
     pub fn errno(&self) -> Option<i32> {
         match self {
             Error::Io(e) => e.raw_os_error(),
@@ -65,6 +75,19 @@ impl Error {
         self.errno() == Some(libc::ERESTART)
     }
 
+    /// Whether the outcome of a batch is unknown (it may have been applied).
+    pub fn is_outcome_unknown(&self) -> bool {
+        matches!(self, Error::OutcomeUnknown(_))
+    }
+
+    /// The unknown-outcome details, if this is that error.
+    pub fn as_outcome_unknown(&self) -> Option<&OutcomeUnknown> {
+        match self {
+            Error::OutcomeUnknown(u) => Some(u),
+            _ => None,
+        }
+    }
+
     /// The batch error, if this is one.
     pub fn as_batch(&self) -> Option<&BatchError> {
         match self {
@@ -80,6 +103,7 @@ impl fmt::Display for Error {
             Error::Io(e) => write!(f, "netlink socket error: {e}"),
             Error::Kernel(e) => e.fmt(f),
             Error::Batch(e) => e.fmt(f),
+            Error::OutcomeUnknown(e) => e.fmt(f),
             Error::Malformed(s) => write!(f, "malformed netlink data: {s}"),
             Error::TooLarge => f.write_str("netlink attribute or message too large"),
             Error::DumpInterrupted => {
@@ -94,6 +118,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
+            Error::OutcomeUnknown(e) => Some(e),
             _ => None,
         }
     }
@@ -132,25 +157,66 @@ impl fmt::Display for KernelError {
     }
 }
 
-/// Failure of an atomic batch. No part of the batch was applied (unless
-/// [`outcome_unknown`](Self::outcome_unknown) is set).
+/// The responses to a batch were insufficient to tell whether it was
+/// applied (lost or undecodable responses, a failed receive or sentinel
+/// after the batch was sent). The batch may or may not have been committed.
+#[derive(Debug)]
+pub struct OutcomeUnknown {
+    cause: Box<Error>,
+}
+
+impl OutcomeUnknown {
+    pub(crate) fn new(cause: Error) -> Self {
+        OutcomeUnknown {
+            cause: Box::new(cause),
+        }
+    }
+
+    /// The failure that prevented the outcome from being determined (a
+    /// socket error, `ENOBUFS` for lost responses, a malformed or truncated
+    /// reply, or the kernel's rejection of the final sentinel request).
+    pub fn cause(&self) -> &Error {
+        &self.cause
+    }
+
+    /// Take the cause.
+    pub fn into_cause(self) -> Error {
+        *self.cause
+    }
+}
+
+impl fmt::Display for OutcomeUnknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "batch outcome unknown (it may or may not have been applied): {}",
+            self.cause
+        )
+    }
+}
+
+impl std::error::Error for OutcomeUnknown {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.cause)
+    }
+}
+
+/// Failure of an atomic batch: the kernel rejected it and no part of it was
+/// applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BatchError {
     /// Every message the kernel rejected, in batch order.
     pub errors: Vec<MessageError>,
-    /// Whether some responses were lost because the socket receive buffer
-    /// overflowed (`ENOBUFS`). If set, `errors` may be incomplete.
+    /// Whether some responses were lost or could not be received (for
+    /// example because the socket receive buffer overflowed, `ENOBUFS`)
+    /// after a rejection was seen. If set, `errors` may be incomplete.
     pub responses_lost: bool,
-    /// Responses were lost, none of them an error, and whether the batch
-    /// was applied cannot be determined (it may have been).
-    pub outcome_unknown: bool,
 }
 
 impl fmt::Display for BatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.errors.as_slice() {
-            [] if self.outcome_unknown => f.write_str("batch outcome unknown")?,
             [] => f.write_str("batch failed")?,
             [e] => e.fmt(f)?,
             [e, rest @ ..] => write!(f, "{e} (and {} more errors)", rest.len())?,

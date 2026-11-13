@@ -10,7 +10,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use ::tokio::io::unix::AsyncFd;
 use netlink_sys::Socket as NlSocket;
 
-use crate::batch::{Batch, BatchOutcome};
+use crate::batch::{Batch, BatchOutcome, BatchResponse};
 use crate::error::{Error, Result};
 use crate::nflog::{GroupConfig, NflogCore, Packets, Stats, set_rcvbuf};
 use crate::nl::Msg;
@@ -132,47 +132,42 @@ impl AsyncSocket {
     }
 
     async fn commit_with(&mut self, batch: &Batch, apply: bool) -> Result<Option<BatchOutcome>> {
-        let genid_before = if ensure_rcvbuf(self.fd.as_raw_fd(), batch.response_size_hint())? {
-            Some(self.get_gen().await?)
-        } else {
-            None
-        };
+        ensure_rcvbuf(self.fd.as_raw_fd(), batch.response_size_hint())?;
         let seq = self.next_seq(batch.message_count() as u32 + 3);
         let mut resp = if apply {
             batch.encode(&mut self.sbuf, seq)?
         } else {
             batch.encode_check(&mut self.sbuf, seq)?
         };
-        resp.set_genid_before(genid_before);
         send_async(&self.fd, &self.sbuf).await?;
+        if let Err(cause) = self.collect(&mut resp).await {
+            return Err(resp.abort(batch, cause));
+        }
+        let out = resp.finish(batch)?;
+        Ok(apply.then_some(out))
+    }
+
+    async fn collect(&mut self, resp: &mut BatchResponse) -> Result<()> {
         // Batch responses are queued synchronously during the send; drain
         // them without waiting before sending the sentinel.
         loop {
-            match recv_datagram(
+            let r = recv_datagram(
                 self.fd.get_ref(),
                 &mut self.rbuf,
                 RECV_BUF,
                 libc::MSG_DONTWAIT,
-            ) {
-                Ok(_) => resp.feed(&self.rbuf)?,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if is_enobufs(&e) => resp.set_lost(),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e.into()),
+            );
+            if resp.on_recv(r, &self.rbuf, true)? {
+                break;
             }
         }
         resp.sentinel(&mut self.sbuf);
         send_async(&self.fd, &self.sbuf).await?;
         while !resp.is_done() {
-            match recv_async(&self.fd, &mut self.rbuf, RECV_BUF).await {
-                Ok(_) => resp.feed(&self.rbuf)?,
-                Err(e) if is_enobufs(&e) => resp.set_lost(),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e.into()),
-            }
+            let r = recv_async(&self.fd, &mut self.rbuf, RECV_BUF).await;
+            resp.on_recv(r, &self.rbuf, false)?;
         }
-        let out = resp.finish(batch)?;
-        Ok(apply.then_some(out))
+        Ok(())
     }
 
     /// Execute a request, calling `f` for each reply message. Returns
@@ -491,5 +486,28 @@ impl AsyncNfqSocket {
 impl AsRawFd for AsyncNfqSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn faulty_responses() {
+        for sc in ALL {
+            let peer = Peer::new();
+            let mut s = AsyncSocket::new().unwrap();
+            s.fd.get_ref().connect(&peer.addr()).unwrap();
+            let h = peer.serve(sc);
+            let r = ::tokio::time::timeout(TIMEOUT, s.commit(&one_table_batch())).await;
+            match (sc, r) {
+                (crate::testutil::Scenario::NoSentinelReply, Err(_)) => {}
+                (sc, Ok(r)) => expect(sc, r),
+                (sc, Err(_)) => panic!("{sc:?}: timed out"),
+            }
+            h.join().unwrap();
+        }
     }
 }

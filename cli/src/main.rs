@@ -719,6 +719,10 @@ fn transaction(
                         report_in(err, prelude, input, file);
                     }
                 }
+                _ if e.is_outcome_unknown() => eprintln!(
+                    "Error: {e}\nThe ruleset may or may not have been changed; \
+                     check it before retrying."
+                ),
                 _ => eprintln!("Error: {e}"),
             }
             false
