@@ -476,6 +476,21 @@ fn needs_ruleset(c: &Cmd) -> bool {
     }
 }
 
+/// Do `cmds` need the ruleset? Not once `flush ruleset` has emptied it,
+/// so a file that starts with one can be parsed, evaluated and compiled
+/// (and then only the kernel can refuse it) without privileges.
+fn needs_cache(cmds: &[(Cmd, Span)]) -> bool {
+    for (c, _) in cmds {
+        if matches!(c, Cmd::Flush { kind: None, .. }) {
+            return false;
+        }
+        if needs_ruleset(c) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Is `c` executed immediately (not part of a transaction)?
 fn is_query(c: &Cmd) -> bool {
     matches!(
@@ -536,8 +551,15 @@ fn run(
             // Without privileges, nft fails when it needs the ruleset;
             // other changes go to the kernel, which rejects them.
             Err(e) if e.errno() == Some(EPERM) => {
-                if cmds.iter().any(|(c, _)| needs_ruleset(c)) {
-                    eprintln!("Operation not permitted (you must be root)");
+                if needs_cache(&cmds) {
+                    // (Syntax errors come first, as nft reports them.)
+                    for e in errors.into_iter().take(10) {
+                        report_in(e, prelude, input, file);
+                    }
+                    // (nft says so for command line input, not for files.)
+                    if file.is_none() {
+                        eprintln!("Operation not permitted (you must be root)");
+                    }
                     eprintln!(
                         "netlink: Error: cache initialization failed: Operation not permitted"
                     );

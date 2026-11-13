@@ -1,5 +1,6 @@
 //! `nfcrt` must behave like `nft`: the same command sequences give the
 //! same output, errors and exit status.
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 fn netns() {
@@ -21,7 +22,14 @@ fn netns() {
 /// Outputs of each command: (status, stdout, stderr).
 type Outputs = Vec<(i32, String, String)>;
 
-fn run_all(bin: &'static str, cmds: Vec<String>, files: Vec<(String, String)>) -> Outputs {
+/// Runs `cmds` in a new network namespace, as root or (`unprivileged`) as
+/// `nobody`, which has no `CAP_NET_ADMIN` there.
+fn run_all(
+    bin: &'static str,
+    cmds: Vec<String>,
+    files: Vec<(String, String)>,
+    unprivileged: bool,
+) -> Outputs {
     std::thread::spawn(move || {
         netns();
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -36,11 +44,12 @@ fn run_all(bin: &'static str, cmds: Vec<String>, files: Vec<(String, String)>) -
         let mut out = Vec::new();
         for c in &cmds {
             let args = shell_words(c);
-            let o = Command::new(bin)
-                .args(&args)
-                .current_dir(&dir)
-                .output()
-                .unwrap();
+            let mut command = Command::new(bin);
+            command.args(&args).current_dir(&dir);
+            if unprivileged {
+                command.uid(65534).gid(65534);
+            }
+            let o = command.output().unwrap();
             out.push((
                 o.status.code().unwrap_or(-1),
                 String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -78,13 +87,22 @@ fn shell_words(s: &str) -> Vec<String> {
 }
 
 fn compare(cmds: &[&str], files: &[(&str, &str)]) {
+    compare_as(cmds, files, false);
+}
+
+fn compare_as(cmds: &[&str], files: &[(&str, &str)], unprivileged: bool) {
     let cmds: Vec<String> = cmds.iter().map(|s| s.to_string()).collect();
     let files: Vec<(String, String)> = files
         .iter()
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
-    let want = run_all("nft", cmds.clone(), files.clone());
-    let got = run_all(env!("CARGO_BIN_EXE_nfcrt"), cmds.clone(), files);
+    let want = run_all("nft", cmds.clone(), files.clone(), unprivileged);
+    let got = run_all(
+        env!("CARGO_BIN_EXE_nfcrt"),
+        cmds.clone(),
+        files,
+        unprivileged,
+    );
     // The JSON metainfo names the implementation.
     let norm = |o: &(i32, String, String)| {
         let mut out = o.1.clone();
@@ -1925,5 +1943,41 @@ fn blocks_sets_and_definitions() {
             ("define_semicolon.nft", "define x = { 1.1.1.1;\n2.2.2.2 }\n"),
             ("use_x.nft", "add rule inet t c ip saddr $x\n"),
         ],
+    );
+}
+
+/// Without `CAP_NET_ADMIN`, a file that starts with `flush ruleset` is
+/// still parsed, evaluated and compiled in userspace: only the kernel
+/// refuses it, at the first command. Otherwise the ruleset is needed.
+#[test]
+fn unprivileged_check() {
+    compare_as(
+        &[
+            "-c -f flushed.nft",
+            "-f flushed.nft",
+            "-c -f mismatch.nft",
+            "-c -f no_flush.nft",
+            "-c -f no_flush_rule.nft",
+            "add table inet t",
+        ],
+        &[
+            (
+                "flushed.nft",
+                "flush ruleset\n\ntable inet t {\n\tset s {\n\t\ttype ipv4_addr\n\t\telements = { 192.0.2.1 }\n\t}\n\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\tct state established,related accept\n\t\tip saddr @s drop\n\t\ttcp dport 22 accept\n\t}\n}\n",
+            ),
+            (
+                "mismatch.nft",
+                "flush ruleset\n\ntable inet t {\n\tset s {\n\t\ttype ipv6_addr\n\t}\n\n\tchain input {\n\t\tip saddr @s drop\n\t}\n}\n",
+            ),
+            (
+                "no_flush.nft",
+                "table inet t {\n\tchain input {\n\t\ttcp dport 22 accept\n\t}\n}\n",
+            ),
+            (
+                "no_flush_rule.nft",
+                "add rule inet t input tcp dport 22 accept\n",
+            ),
+        ],
+        true,
     );
 }
