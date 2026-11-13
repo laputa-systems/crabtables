@@ -221,3 +221,44 @@ fn extra() {
 fn wiki() {
     check(include_str!("data/wiki.nft"));
 }
+
+#[test]
+fn concat_nested_dependency_keys() {
+    for family in ["ip", "inet"] {
+        check(&format!(
+            "table {family} t {{
+  chain c {{
+    type filter hook input priority filter; policy accept;
+    ip saddr . tcp dport and 255 vmap {{ 1.2.3.4 . 80 : drop }}
+  }}
+}}
+"
+        ));
+        check(&format!(
+            "table {family} t {{
+  chain c {{
+    type filter hook input priority filter; policy accept;
+    ip saddr . tcp dport & 0xff00 | 0x50 vmap {{ 1.2.3.4 . 80 : drop }}
+    ip saddr . ip protocol & 0xf vmap {{ 1.2.3.4 . 6 : drop }}
+  }}
+}}
+"
+        ));
+    }
+}
+
+#[test]
+fn concat_nested_dependency_keys_ip6() {
+    for family in ["ip6", "inet"] {
+        check(&format!(
+            "table {family} t {{
+  chain c {{
+    type filter hook input priority filter; policy accept;
+    ip6 saddr . tcp dport and 255 vmap {{ ::1 . 80 : drop }}
+    ip6 saddr . tcp dport & 0xff00 | 0x50 vmap {{ ::1 . 80 : drop }}
+  }}
+}}
+"
+        ));
+    }
+}

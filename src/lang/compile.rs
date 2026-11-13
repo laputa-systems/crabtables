@@ -2783,6 +2783,29 @@ impl RuleC<'_> {
         Ok(())
     }
 
+    /// Emit the dependencies of every protocol expression nested in `e`, so
+    /// that loading `e` later emits none that would clobber loaded registers.
+    fn need_all(&mut self, e: &Expr) -> Result<()> {
+        match e {
+            Expr::Payload { proto: pn, .. } => {
+                if let Some(pr) = proto::proto(pn) {
+                    self.need(pr)?;
+                }
+            }
+            Expr::Exthdr { desc, .. } => self.exthdr_need(desc)?,
+            Expr::Concat(parts) => {
+                for p in parts {
+                    self.need_all(p)?;
+                }
+            }
+            Expr::Binop(_, l, _) => self.need_all(l)?,
+            Expr::Hash { input: Some(i), .. } => self.need_all(i)?,
+            Expr::Map(key, _) => self.need_all(key)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Record what an explicit match provides.
     fn provides(&mut self, left: &Expr, c: &Comp, data: &[u8]) {
         let b = |i: usize| data.get(i).copied().unwrap_or(0);
@@ -3030,11 +3053,7 @@ impl RuleC<'_> {
             Expr::Concat(parts) => {
                 // Dependencies of all components come first.
                 for p in parts {
-                    if let Expr::Payload { proto: pn, .. } = p {
-                        if let Some(pr) = proto::proto(pn) {
-                            self.need(pr)?;
-                        }
-                    }
+                    self.need_all(p)?;
                 }
                 let mut comps = Vec::new();
                 let mut w = word;
@@ -3186,6 +3205,14 @@ impl RuleC<'_> {
         exthdr_lookup(desc)
     }
 
+    fn exthdr_need(&mut self, desc: &str) -> Result<()> {
+        match self.exthdr_spec(desc)?.0 {
+            nft::ExthdrOp::Ipv4 => self.dep_l3(ethertype::IP),
+            nft::ExthdrOp::Ipv6 => self.dep_l3(ethertype::IP6),
+            _ => Ok(()),
+        }
+    }
+
     fn exthdr_load(
         &mut self,
         desc: &str,
@@ -3194,11 +3221,7 @@ impl RuleC<'_> {
         reg: Reg,
     ) -> Result<Vec<Comp>> {
         let (op, h) = self.exthdr_spec(desc)?;
-        match op {
-            nft::ExthdrOp::Ipv4 => self.dep_l3(ethertype::IP)?,
-            nft::ExthdrOp::Ipv6 => self.dep_l3(ethertype::IP6)?,
-            _ => {}
-        }
+        self.exthdr_need(desc)?;
         if exists || field.is_none() {
             self.push(kx::Exthdr {
                 dreg: Some(reg),
