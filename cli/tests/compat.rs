@@ -43,8 +43,14 @@ fn run_all(
         }
         let mut out = Vec::new();
         for c in &cmds {
-            let args = shell_words(c);
+            let mut args = shell_words(c);
             let mut command = Command::new(bin);
+            // `< file` feeds a file of `files` to the standard input.
+            if let Some(i) = args.iter().position(|a| a == "<") {
+                let name = args.remove(i + 1);
+                args.remove(i);
+                command.stdin(std::fs::File::open(dir.join(name)).unwrap());
+            }
             command.args(&args).current_dir(&dir);
             if unprivileged {
                 command.uid(65534).gid(65534);
@@ -325,6 +331,149 @@ fn errors() {
             "bad.nft",
             "table ip t {\n\tchain d {\n\t\tjump nowhere\n\t}\n}\n",
         )],
+    );
+}
+
+const RESTRICTIVE: &str = "table ip orig {
+	chain input {
+		type filter hook input priority 0; policy drop;
+		ct state established,related accept
+	}
+}
+";
+
+/// Each of `inputs` (arguments of `nft` and `nfcrt`) is rejected by the
+/// kernel after a `list`; the loaded ruleset must be exactly as before.
+/// `nft` is checked too unless `nfcrt_only` (nft crashes on some inputs).
+fn rejected_input_keeps_ruleset(inputs: &[&str], files: &[(&str, &str)], nfcrt_only: bool) {
+    let files: Vec<(String, String)> = files
+        .iter()
+        .chain(&[("orig.nft", RESTRICTIVE)])
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    for input in inputs {
+        let cmds: Vec<String> = ["-f orig.nft", "list ruleset", input, "list ruleset"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = run_all(env!("CARGO_BIN_EXE_nfcrt"), cmds.clone(), files.clone(), false);
+        let mut results = vec![("nfcrt", got)];
+        if !nfcrt_only {
+            results.push(("nft", run_all("nft", cmds, files.clone(), false)));
+        }
+        for (name, o) in &results {
+            assert_eq!(o[0].0, 0, "{name} {input}: {}", o[0].2);
+            assert!(o[1].1.contains("policy drop"), "{name} {input}: {}", o[1].1);
+            assert_eq!(o[2].0, 1, "{name} {input} must fail: {}", o[2].1);
+            assert!(o[2].2.contains("Error:"), "{name} {input}: {}", o[2].2);
+            assert_eq!(o[3], o[1], "{name} {input} changed the ruleset");
+        }
+    }
+}
+
+const FAILING: &str = "flush ruleset
+list ruleset
+add table ip probe
+add chain ip probe bad { type nat hook forward priority 0; }
+";
+
+#[test]
+fn query_between_mutations_is_one_transaction() {
+    let json = r#"{"nftables": [
+{"flush": {"ruleset": null}},
+{"list": {"ruleset": null}},
+{"add": {"table": {"family": "ip", "name": "probe"}}},
+{"add": {"chain": {"family": "ip", "table": "probe", "name": "bad", "type": "nat", "hook": "forward", "prio": 0}}}
+]}"#;
+    rejected_input_keeps_ruleset(
+        &[
+            "-f bad.nft",
+            "-f - < bad.nft",
+            "-f outer.nft",
+            "-f - < outer.nft",
+            "-f nested.nft",
+        ],
+        &[
+            ("bad.nft", FAILING),
+            ("outer.nft", "flush ruleset\ninclude \"tail.nft\"\n"),
+            (
+                "tail.nft",
+                "list ruleset\nadd table ip probe\ninclude \"last.nft\"\n",
+            ),
+            (
+                "last.nft",
+                "add chain ip probe bad { type nat hook forward priority 0; }\n",
+            ),
+            ("nested.nft", "flush ruleset\nlist ruleset\ninclude \"tail.nft\"\n"),
+        ],
+        false,
+    );
+    rejected_input_keeps_ruleset(
+        &["-j -f bad.json", "-j -f - < bad.json"],
+        &[("bad.json", json)],
+        true,
+    );
+}
+
+#[test]
+fn query_between_mutations_commits_together() {
+    let ok = "flush ruleset
+list ruleset
+add table ip probe
+add chain ip probe c
+list ruleset
+";
+    compare(
+        &[
+            "-f orig.nft",
+            "-f ok.nft",
+            "list ruleset",
+            "-f orig.nft",
+            "-f - < ok.nft",
+            "list ruleset",
+            "-f orig.nft",
+            "-f outer.nft",
+            "list ruleset",
+        ],
+        &[
+            ("orig.nft", RESTRICTIVE),
+            ("ok.nft", ok),
+            ("outer.nft", "include \"ok.nft\"\n"),
+        ],
+    );
+}
+
+#[test]
+fn query_of_removed_object_commits_nothing() {
+    let orig = "table ip orig {
+	set s {
+		type ipv4_addr
+		elements = { 1.1.1.1 }
+	}
+	chain input {
+		type filter hook input priority 0; policy drop;
+	}
+}
+";
+    compare(
+        &[
+            "-f orig.nft",
+            "-f - < get.nft",
+            "list ruleset",
+            "-f - < list.nft",
+            "list ruleset",
+            "-f reset.nft",
+            "list ruleset",
+            "-f get_set.nft",
+            "list ruleset",
+        ],
+        &[
+            ("orig.nft", orig),
+            ("get.nft", "flush ruleset\nget element ip orig s { 1.1.1.1 }\nadd table ip n\n"),
+            ("list.nft", "delete table ip orig\nlist table ip orig\nadd table ip n\n"),
+            ("reset.nft", "flush ruleset\nreset counters table ip orig\nadd table ip n\n"),
+            ("get_set.nft", "add table ip n\nget element ip orig nope { 1.1.1.1 }\n"),
+        ],
     );
 }
 

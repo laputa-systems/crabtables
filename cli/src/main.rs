@@ -402,6 +402,8 @@ fn strerror(e: &std::io::Error) -> String {
 
 /// Print an error located in the input.
 fn report(e: &Error, input: &str, file: Option<&str>) {
+    // (nft names standard input by its device.)
+    let file = file.map(|f| if f == "-" { "/dev/stdin" } else { f });
     eprint!("{}", e.render(input, file));
 }
 
@@ -580,31 +582,27 @@ fn run(
         }
         return false;
     }
-    let mut pending: Vec<&(Cmd, Span)> = Vec::new();
-    for cs in &cmds {
-        let c = &cs.0;
-        if is_query(c) {
-            if !transaction(cli, sock, &pending, prelude, input, file, out) {
-                return false;
+    // All changes of one input are a single kernel transaction, so a
+    // rejection leaves the ruleset as it was. Like nft, which evaluates
+    // every command before it lists anything, queries show the ruleset
+    // the input produces: they run in order after the commit.
+    let pending: Vec<&(Cmd, Span)> = cmds.iter().filter(|cs| !is_query(&cs.0)).collect();
+    if !transaction(cli, sock, &pending, prelude, input, file, out) {
+        return false;
+    }
+    for cs in cmds.iter().filter(|cs| is_query(&cs.0)) {
+        if let Err(e) = query(cli, sock, &cs.0, cs.1, out) {
+            if e.source.as_ref().and_then(|s| s.errno()) == Some(EPERM) {
+                // (As nft, which needs the ruleset for queries.)
+                eprintln!("Operation not permitted (you must be root)");
+                eprintln!("netlink: Error: cache initialization failed: Operation not permitted");
+            } else {
+                report_in(e, prelude, input, file);
             }
-            pending.clear();
-            if let Err(e) = query(cli, sock, c, cs.1, out) {
-                if e.source.as_ref().and_then(|s| s.errno()) == Some(EPERM) {
-                    // (As nft, which needs the ruleset for queries.)
-                    eprintln!("Operation not permitted (you must be root)");
-                    eprintln!(
-                        "netlink: Error: cache initialization failed: Operation not permitted"
-                    );
-                } else {
-                    report_in(e, prelude, input, file);
-                }
-                return false;
-            }
-        } else {
-            pending.push(cs);
+            return false;
         }
     }
-    transaction(cli, sock, &pending, prelude, input, file, out)
+    true
 }
 
 /// Report an error located in `prelude` (the -D definitions, shown like

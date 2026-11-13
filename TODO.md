@@ -1,15 +1,5 @@
 Prefix: CRAB
 Next: 8
-### CRAB-1 · P1 · Query commands split one input file into independently committed updates
-
-- **Area:** CLI atomicity
-- **Where:** `cli/src/main.rs:583`, `cli/src/main.rs:628`, `src/lang/compile.rs:883`, `tests/errors.rs:17`
-- **Problem:** The CLI commits pending mutations before each query and starts a fresh batch afterward. In a namespace with an installed firewall, a file containing `flush ruleset; list ruleset; add table ip probe; add chain ip probe bad { type nat hook forward priority 0; }` passes the compiler's hook/type checks, commits the flush, then fails the final batch because NAT does not support the forward hook. The old firewall remains removed. Source trace reaches the kernel's hook-mask rejection in [Linux v6.12](https://github.com/torvalds/linux/blob/v6.12/net/netfilter/nf_tables_api.c#L2345); runtime reproduction is unproven in this review environment.
-- **Recommendation:** Keep all mutations from one input in one kernel transaction. Define query output against the evaluated ruleset, or reject a mixed input before any mutation if its query cannot be supported atomically. Add an nft/nfcrt differential case with a restrictive initial ruleset and a kernel-invalid final command separated by list, asserting failure preserves the original ruleset and packet policy. Cover stdin, file includes, JSON, and successful mixed inputs through the same boundary.
-- **Fix with:** error-model
-- **Effort:** M
-
-
 ### CRAB-2 · P1 · Nested protocol expressions overwrite earlier concatenated key components
 
 - **Area:** Language compiler
