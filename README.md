@@ -57,9 +57,13 @@ sudo setcap cap_net_admin+ep ~/.cargo/bin/nfcrt
 
 The suites compare compiler bytecode, CLI output, and JSON against `nft`.
 Separate tests exercise real traffic, NAT, conntrack, and rejected-batch rollback.
-These checks do not establish packet-level equivalence for every supported syntax
-combination or deployment. Primary-firewall qualification is pending the
-[differential testing design](https://github.com/laputa-systems/crabtables/blob/main/docs/rfc/CRAB-7-nft-differential-qualification.md).
+The paired qualification suite (`cargo test -p nfcrt --all-features --test qualify`, as root)
+runs the same policies and traffic through `nft`, `nfcrt`, and the typed API in separate
+network-namespace topologies for IPv4 and IPv6, and writes an evidence summary to
+`.work/qualify-evidence.json`. It currently reports known divergences from `nft`, so no
+deployment profile is qualified; see the
+[differential testing design](https://github.com/laputa-systems/crabtables/blob/main/docs/rfc/CRAB-7-nft-differential-qualification.md)
+for its scope, results, and what remains.
 See [open correctness findings](https://github.com/laputa-systems/crabtables/blob/main/TODO.md)
 before relying on compound expressions or complete-file rollback.
 

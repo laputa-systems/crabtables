@@ -101,9 +101,57 @@ Qualification passes only when all required rows execute, the declared generated
 
 ## Open questions
 
+Both questions are decided in the Decision section.
+
 1. **Which kernel/nft pairs and architectures must be supported?** Options are the exact production stack or a broader supported range. Recommend the production stack plus the oldest pair the project intends to support, recording exact versions and byte order. The earlier 6.12/1.1.3 measurements are not a substitute for that choice.
 2. **Which deployment features belong in the first qualification?** Recommend local and routed IPv4/IPv6 NAT and filtering through ip/ip6/inet. Add bridge, netdev, offload, NFQUEUE, or other extensions when they are part of the intended deployment; otherwise leave them outside the initial qualification claim.
 
 ## Decision
 
-Pending profile selection and implementation. Rigorous differential testing is already requested; the open decisions define its supported deployment scope. Acceptance of this design does not establish primary-firewall readiness. Keep this RFC until the accepted design is implemented, then move the enduring qualification contract to its owning documentation and delete the completed RFC.
+Owner decisions on the open questions:
+
+1. **First profile:** the kernel of the host running the pinned test image (`crabtables-test:local`) with the nft 1.1.x that Debian trixie packages in that image. The suite records the exact kernel release, nft and conntrack versions, binary hashes, architecture, byte order, and loaded netfilter modules at run time in its evidence file; no other kernel/nft pair is claimed.
+2. **First scope:** local and routed IPv4 and IPv6 filtering and NAT through the `ip`, `ip6`, and `inet` families (prerouting, input, forward, output, postrouting). Bridge, netdev, flowtable offload, and NFQUEUE are outside this profile, as are the conntrack-zone and RELATED/INVALID rows.
+
+Acceptance of this design does not establish primary-firewall readiness.
+
+### Implemented
+
+`cli/tests/qualify.rs` (fixtures) and `tests/common/qualify.rs` (harness) implement the paired suite. It lives in the `nfcrt` package so it can run the `nfcrt` binary. Each scenario builds one disposable client/router/server world per frontend (`nft`, `nfcrt`, and the typed API where the scenario has a typed policy), verifies that the namespaces are distinct from each other and from the host and start with an empty ruleset, installs the policy through that frontend, and drives the same stimuli. It compares delivery and replies, receiver-observed addresses and ports, rule counter deltas, conntrack tuples and state, and the structural `nft list ruleset` listing against the `nft` world. The `nft` world must also meet the expectations written in the fixture, so a broken topology or fixture fails instead of passing by agreement. Probes use explicit source ports, readiness is established before any stimulus, and every wait has a bound; absence of delivery is shown with a short deadline or with a fence datagram that is sent after the data and reported only after every other socket is empty.
+
+Rows executed for IPv4 and IPv6, each with positive and negative controls:
+
+| Row | Cases |
+| --- | --- |
+| Expressions | nested-bitop concatenation vmap keys (TCP and masked UDP address and port), interval and verdict maps with jump, goto and return counters, `/0` and full-width prefixes and an interval set, host-order mark ranges crossing byte boundaries plus a seeded generated set |
+| NAT | DNAT, SNAT, SNAT port range, masquerade, local redirect, over TCP and UDP, reply direction, original and reply conntrack tuples, rule counter deltas; DNAT and masquerade also through the typed API |
+| Stateful replacement | an established NATed flow across an atomic `flush ruleset` replacement, a new flow, direct flows the policies decide differently, and a canary flow denied by both policies |
+| Rejected updates | a kernel-invalid operation first, in the middle, last, and after a 20000-element split, through `nft -f`, `nfcrt -f`, and the typed API, with the held flow and probes before and after |
+| CLI boundaries | file, stdin, `include`, JSON (with and without an intervening `list`), parse error, valid replacement, and `-c` check mode that must install nothing |
+
+The generated-case budget is four seeded mark ranges (seed `0xc4ab70`, recorded in the evidence) in addition to four fixed byte-boundary ranges. Expected verdicts come from plain integer arithmetic in the fixture, never from the compiler under test.
+
+Run it with `cargo test -p nfcrt --all-features --test qualify` as root (the pinned image runs it with `--privileged`). It writes `.work/qualify-evidence.json` (override with `QUALIFY_EVIDENCE`): profile, seeds, case inventory, executed/passed/failed/known-divergence/skipped counts, unmet required rows, and per case the raw reference observations and any divergence. A required row passes only if every case in it executes and passes; a skipped case (only possible through `QUALIFY_FILTER`) or a known divergence leaves the profile unqualified, and `QUALIFY_STRICT=1` makes the test fail in that state. `QUALIFY_FAULT=drop-nat|unmask-concat|split-replace` applies a fault to the candidate policy for a manual run, and the `harness_detects_faults` test asserts that all three are detected.
+
+Transaction-outcome faults (replies lost, truncated or undecodable; another writer; blocking and asynchronous socket errors) remain covered at the library level by the CRAB-4 tests in `src/batch.rs`, `src/socket.rs`, and `src/asynchronous.rs`; the suite does not duplicate them.
+
+### Findings
+
+Reference behavior the suite had to accommodate, recorded in the evidence:
+
+- `nft -j -f` of a JSON file containing a `list` command terminates with signal 11 in nft 1.1.3. `cli.reject_json_with_list` therefore judges `nfcrt` against the fixture (non-zero status, unchanged ruleset and packet policy) and records the crash as a note.
+- Replacing a base-chain ruleset with `nft -f` (`flush ruleset` plus new tables) lets a few packets (0 to 3 of several thousand) of a flow both policies deny through while the hooks are swapped, on this kernel. The canary oracle therefore allows a budget of 32 packets; the injected non-atomic replacement leaks thousands.
+- Rejection diagnostics differ in text when the kernel refuses an operation (for example a `nat` chain on the forward hook) and nft words the error itself while `nfcrt` reports the kernel error. The suite compares the exit status and the presence of an `Error:` diagnostic, and keeps both texts raw.
+
+Known divergences kept as clearly marked fixtures (the case runs, must still diverge, and is reported `known_divergence`):
+
+| Id | Case | Difference |
+| --- | --- | --- |
+| CRAB-7-D1 | `nat.map.tcp.{v4,v6}` | `dnat to ip daddr . tcp dport map { ... }` is accepted by nft and rejected by `nfcrt` with `unsupported value`, so mapped DNAT does not happen |
+| CRAB-7-D2 | `expr.mark_range_single_value.{v4,v6}` | `meta mark 100-100` lists as `100` in nft and as `100-100` in `nfcrt`; packet behavior agrees |
+| CRAB-7-D3 | `cli.list_stdout_in_replacement.{v4,v6}` | a `list ruleset` that precedes later definitions in a replacement file prints a different listing (nft shows the table without its rules, `nfcrt` the rules of the new table); status, transaction and packet policy agree |
+| CRAB-7-D4 | `nat.listing.v6` | `nfcrt list ruleset` prints an IPv6 `dnat to [addr]:port` without the brackets, which is not reparsable; nft prints them |
+
+### Not yet covered
+
+The conntrack row (RELATED and INVALID stimuli, zones, mark propagation, NOTRACK), the successful-update row with large mixed element lists under continuing traffic beyond the single replacement scenario, `get`/`describe` in JSON, and a larger generated expression budget are not implemented. The first profile is unqualified while any of these or any known divergence remains. Keep this RFC until the accepted design is implemented, then move the enduring qualification contract to its owning documentation and delete the completed RFC.
