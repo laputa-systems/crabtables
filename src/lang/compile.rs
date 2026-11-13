@@ -388,6 +388,7 @@ struct RuleC<'a> {
     /// Expressions inserted at the start of the rule (dependencies of
     /// later statements).
     prepended: usize,
+    hash_input: Option<u32>,
 }
 
 impl Compiler {
@@ -1556,6 +1557,7 @@ impl Compiler {
             spans: Vec::new(),
             cur_span: r.span,
             prepended: 0,
+            hash_input: None,
         };
         for (i, st) in r.stmts.iter().enumerate() {
             rc.cur_span = r.stmt_spans.get(i).copied().unwrap_or(r.span);
@@ -1714,6 +1716,21 @@ pub(crate) fn exthdr_field(desc: &str, field: &str) -> Result<(nft::ExthdrOp, u3
         .find(|f| f.0 == field)
         .ok_or_else(|| Error::msg(format!("unknown field `{field}` of {desc}")))?;
     Ok((op, f.3, f.2))
+}
+
+pub(crate) fn exthdr_typeof(desc: &str, field: &str) -> Option<(u32, u32, u32)> {
+    let (op, h) = exthdr_lookup(desc).ok()?;
+    let pos = h.fields.iter().position(|f| f.0 == field)? as u32;
+    let idx = match op {
+        nft::ExthdrOp::TcpOpt | nft::ExthdrOp::Sctp => pos,
+        nft::ExthdrOp::Ipv4 => match field {
+            "ptr" => 4,
+            "addr" => 5,
+            _ => pos + 1,
+        },
+        _ => pos + 1,
+    };
+    Some((op.raw(), u32::from(h.ty), idx))
 }
 
 /// Edit distance between two names.
@@ -1878,6 +1895,7 @@ enum Tyof<'a> {
     TypedConcat,
     /// Expressions.
     Exprs(&'a [Expr]),
+    ConcatExprs(&'a [Expr]),
 }
 
 impl Tyof<'_> {
@@ -1894,6 +1912,8 @@ impl Tyof<'_> {
             Tyof::Exprs(e) => {
                 typeof_udata::encode(e, |_| None).unwrap_or_else(typeof_udata::value_marker)
             }
+            Tyof::ConcatExprs(e) => typeof_udata::encode_concat(e, |_| None)
+                .unwrap_or_else(typeof_udata::value_marker),
         }
     }
 }
@@ -2082,7 +2102,10 @@ fn expr_comp(e: &Expr, family: Family) -> Result<Comp> {
             be: false,
             ..Comp::of_type(id::INTEGER, 4)
         }),
-        Expr::Hash { .. } => Ok(Comp::of_type(id::MARK, 4)),
+        Expr::Hash { .. } => Ok(Comp {
+            be: false,
+            ..Comp::of_type(id::INTEGER, 4)
+        }),
         Expr::Osf { .. } => Ok(Comp::of_type(id::STRING, 16)),
         Expr::Exthdr { .. } | Expr::Raw { .. } => Err(Error::msg("unsupported typeof expression")),
         _ => Err(Error::msg("unsupported typeof expression")),
@@ -3061,7 +3084,7 @@ impl RuleC<'_> {
             } => {
                 match input {
                     Some(inp) => {
-                        let w = word + 4;
+                        let w = self.hash_input.unwrap_or(word + 4);
                         let comps = self.load(inp, w, None)?;
                         self.push(kx::Hash {
                             sreg: Some(reg_at(w)),
@@ -3083,7 +3106,10 @@ impl RuleC<'_> {
                         ty: Some(nft::HashType::Symmetric),
                     }),
                 }
-                Ok(vec![Comp::of_type(id::MARK, 4)])
+                Ok(vec![Comp {
+                    be: false,
+                    ..Comp::of_type(id::INTEGER, 4)
+                }])
             }
             Expr::Ipsec { dir, spnum, key } => {
                 let (k, ty, len, be) = match key.as_str() {
@@ -3111,16 +3137,29 @@ impl RuleC<'_> {
                 for p in parts {
                     self.need_all(p)?;
                 }
+                let saved = self.hash_input;
+                let total: Option<u32> = parts.iter().map(|p| self.static_words(p)).sum();
+                if let Some(t) = total {
+                    self.hash_input = Some(word + t * 2);
+                }
                 let mut comps = Vec::new();
                 let mut w = word;
                 for (i, p) in parts.iter().enumerate() {
                     let h = hint.and_then(|h| h.get(i)).map(std::slice::from_ref);
-                    let c = self.load(p, w, h)?;
+                    let c = self.load(p, w, h);
+                    let c = match c {
+                        Ok(c) => c,
+                        Err(e) => {
+                            self.hash_input = saved;
+                            return Err(e);
+                        }
+                    };
                     for x in &c {
                         w += x.padded() / 4;
                     }
                     comps.extend(c);
                 }
+                self.hash_input = saved;
                 Ok(comps)
             }
             Expr::Binop(op, l, r) => {
@@ -3136,6 +3175,18 @@ impl RuleC<'_> {
                         let n: u32 = raw_text(r)
                             .and_then(|t| t.parse().ok())
                             .ok_or_else(|| Error::msg("shift amount must be a number"))?;
+                        let mut c = c;
+                        if c.be && c.shift == 0 && matches!(c.len, 2 | 4 | 8) {
+                            self.push(kx::Byteorder {
+                                sreg: reg,
+                                dreg: reg,
+                                op: nft::ByteorderOp::Ntoh,
+                                len: c.len,
+                                size: c.len,
+                            });
+                            c.be = false;
+                        }
+                        c.ty = id::INTEGER;
                         self.push(kx::Bitwise {
                             sreg: reg,
                             dreg: reg,
@@ -3148,6 +3199,7 @@ impl RuleC<'_> {
                             data: Some(n.to_ne_bytes().to_vec()),
                             ..Default::default()
                         });
+                        return Ok(vec![c]);
                     }
                     _ => {
                         let v = self.const_value(&c, r)?;
@@ -3192,6 +3244,44 @@ impl RuleC<'_> {
             Expr::Value(Value::Raw(sym)) => Err(Error::about("No symbol type information", sym)),
             _ => Err(Error::msg("expression cannot be used here")),
         }
+    }
+
+    fn byteorder_shift(&self, e: &Expr) -> bool {
+        let Expr::Binop(BinOp::Lshift | BinOp::Rshift, l, _) = e else {
+            return false;
+        };
+        expr_comp(l, self.family)
+            .is_ok_and(|c| c.be && c.shift == 0 && matches!(c.len, 2 | 4 | 8))
+    }
+
+    fn static_words(&self, e: &Expr) -> Option<u32> {
+        let span = |start: u32, bits: u32| (start + bits).div_ceil(8) - start / 8;
+        let len = match e {
+            Expr::Payload { proto: p, field } => {
+                let pr = proto::proto(p)?;
+                let (_, f) = pr.field(field)?;
+                span(pr.base_offset + f.offset, f.len)
+            }
+            Expr::Raw { offset, len, .. } => span(*offset, *len),
+            Expr::Exthdr {
+                desc,
+                field,
+                exists,
+            } => match field.as_deref() {
+                Some(f) if !exists && !f.starts_with('@') => {
+                    let (_, h) = exthdr_lookup(desc).ok()?;
+                    let f = h.fields.iter().find(|x| x.0 == f)?;
+                    span(f.1, f.2)
+                }
+                _ => 1,
+            },
+            Expr::Meta(k) => proto::meta(k)?.len,
+            Expr::Ct { key, .. } => ct_def(key, self.family).ok()?.2,
+            Expr::Hash { .. } | Expr::Numgen { .. } => 4,
+            Expr::Binop(_, l, _) => return self.static_words(l),
+            _ => return None,
+        };
+        Some(len.div_ceil(4))
     }
 
     /// A constant operand of a bit operation (flags lists allowed).
@@ -3412,7 +3502,11 @@ impl RuleC<'_> {
             e.clone()
         };
         let parts: Vec<Expr> = match key_expr {
-            Expr::Concat(p) => p.iter().map(unmask).collect(),
+            Expr::Concat(p) => p
+                .iter()
+                .take_while(|e| !self.byteorder_shift(e))
+                .map(unmask)
+                .collect(),
             e => vec![unmask(e)],
         };
         // nft records no typeof for sub-byte header fields.
@@ -3426,8 +3520,12 @@ impl RuleC<'_> {
                 _ => None,
             },
             merge: interval && !is_map,
-            key_typeof: if encodable && (!is_map || parts.len() > 1) {
-                Some(Tyof::Exprs(&parts))
+            key_typeof: if encodable && (!is_map || matches!(key_expr, Expr::Concat(_))) {
+                Some(if matches!(key_expr, Expr::Concat(_)) {
+                    Tyof::ConcatExprs(&parts)
+                } else {
+                    Tyof::Exprs(&parts)
+                })
             } else if is_map {
                 Some(Tyof::Value)
             } else {

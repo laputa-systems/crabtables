@@ -638,6 +638,16 @@ fn zero_length_prefix_matches_its_family() {
 /// Whether a TCP connection from `src` to `dst` completes within `timeout_ms`.
 #[cfg(feature = "lang")]
 fn tcp_connects_from(src: Ipv4Addr, dst: std::net::SocketAddrV4, timeout_ms: i32) -> bool {
+    tcp_connects_with_mss(src, dst, None, timeout_ms)
+}
+
+#[cfg(feature = "lang")]
+fn tcp_connects_with_mss(
+    src: Ipv4Addr,
+    dst: std::net::SocketAddrV4,
+    mss: Option<libc::c_int>,
+    timeout_ms: i32,
+) -> bool {
     let addr = |a: &std::net::SocketAddrV4| libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: a.port().to_be(),
@@ -655,6 +665,16 @@ fn tcp_connects_from(src: Ipv4Addr, dst: std::net::SocketAddrV4, timeout_ms: i32
         assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
         let r = libc::bind(fd, (&raw const src).cast(), len);
         assert_eq!(r, 0, "bind: {}", std::io::Error::last_os_error());
+        if let Some(mss) = mss {
+            let r = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_MAXSEG,
+                (&raw const mss).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            assert_eq!(r, 0, "TCP_MAXSEG: {}", std::io::Error::last_os_error());
+        }
         let r = libc::connect(fd, (&raw const dst).cast(), len);
         let ok = if r == 0 {
             true
@@ -748,4 +768,150 @@ fn concat_vmap_nested_bitop_ip() {
 #[test]
 fn concat_vmap_nested_bitop_inet() {
     concat_key_verdicts("inet", [80, 81, 336]);
+}
+
+#[cfg(feature = "lang")]
+fn commit_script(script: &str) {
+    let cmds = crabtables::lang::parse::parse(script)
+        .unwrap_or_else(|e| panic!("parse: {}", e.render(script, Some("script"))));
+    let mut c = crabtables::lang::compile::Compiler::new();
+    c.compile(&cmds)
+        .unwrap_or_else(|e| panic!("compile: {}", e.render(script, Some("script"))));
+    let (batch, _) = c.into_batch();
+    Socket::new().unwrap().commit(&batch).unwrap();
+}
+
+#[cfg(feature = "lang")]
+fn anonymous_set_keys(family: Family) -> Vec<Vec<u8>> {
+    let mut s = Socket::new().unwrap();
+    let mut keys = Vec::new();
+    for set in s.list_sets(family, Some("t")).unwrap() {
+        if set.flags & NFT_SET_ANONYMOUS != 0 {
+            for e in s.list_elems(family, "t", &set.name).unwrap() {
+                keys.extend(e.key);
+            }
+        }
+    }
+    keys
+}
+
+#[cfg(feature = "lang")]
+fn concat_shift_verdicts(family: &str) {
+    netns();
+    commit_script(&format!(
+        "table {family} t {{
+  chain out {{
+    type filter hook output priority filter; policy accept;
+    ip saddr . tcp dport << 1 vmap {{ 127.0.0.2 . 160 : drop }}
+    accept
+  }}
+}}
+"
+    ));
+
+    let fam = if family == "ip" { Family::Ipv4 } else { Family::Inet };
+    assert_eq!(
+        anonymous_set_keys(fam),
+        vec![vec![127, 0, 0, 2, 160, 0, 0, 0]],
+        "key stores the shifted value in host order"
+    );
+
+    let ports = [80u16, 81, 160, 40];
+    let _l: Vec<TcpListener> = ports
+        .iter()
+        .map(|p| TcpListener::bind((Ipv4Addr::LOCALHOST, *p)).unwrap())
+        .collect();
+    let to = |p: u16| std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, p);
+    let listed = Ipv4Addr::new(127, 0, 0, 2);
+    let unlisted = Ipv4Addr::new(127, 0, 0, 3);
+
+    assert!(
+        !tcp_connects_from(listed, to(80), 400),
+        "listed address, port 80 shifted to 160"
+    );
+    assert!(
+        tcp_connects_from(listed, to(81), 2000),
+        "listed address, port 81 shifted to 162"
+    );
+    assert!(
+        tcp_connects_from(listed, to(160), 2000),
+        "listed address, port 160 is not the shifted value"
+    );
+    assert!(
+        tcp_connects_from(listed, to(40), 2000),
+        "listed address, port 40 shifted to 80"
+    );
+    assert!(
+        tcp_connects_from(unlisted, to(80), 2000),
+        "other address, shifted port 80"
+    );
+}
+
+#[cfg(feature = "lang")]
+#[test]
+fn concat_vmap_shifted_port_ip() {
+    concat_shift_verdicts("ip");
+}
+
+#[cfg(feature = "lang")]
+#[test]
+fn concat_vmap_shifted_port_inet() {
+    concat_shift_verdicts("inet");
+}
+
+#[cfg(feature = "lang")]
+fn concat_maxseg_verdicts(family: &str) {
+    netns();
+    commit_script(&format!(
+        "table {family} t {{
+  chain out {{
+    type filter hook output priority filter; policy accept;
+    ip saddr . tcp option maxseg size vmap {{ 127.0.0.2 . 1400 : drop }}
+    accept
+  }}
+}}
+"
+    ));
+
+    let fam = if family == "ip" { Family::Ipv4 } else { Family::Inet };
+    assert_eq!(
+        anonymous_set_keys(fam),
+        vec![vec![127, 0, 0, 2, 0x05, 0x78, 0, 0]],
+        "key stores the option value in network order"
+    );
+
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 8080)).unwrap();
+    let to = std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080);
+    let listed = Ipv4Addr::new(127, 0, 0, 2);
+    let unlisted = Ipv4Addr::new(127, 0, 0, 3);
+
+    assert!(
+        !tcp_connects_with_mss(listed, to, Some(1400), 400),
+        "listed address, listed MSS"
+    );
+    assert!(
+        tcp_connects_with_mss(listed, to, Some(1200), 2000),
+        "listed address, other MSS"
+    );
+    assert!(
+        tcp_connects_with_mss(unlisted, to, Some(1400), 2000),
+        "other address, listed MSS"
+    );
+    assert!(
+        tcp_connects_with_mss(listed, to, None, 2000),
+        "listed address, default MSS"
+    );
+    drop(l);
+}
+
+#[cfg(feature = "lang")]
+#[test]
+fn concat_vmap_tcp_maxseg_ip() {
+    concat_maxseg_verdicts("ip");
+}
+
+#[cfg(feature = "lang")]
+#[test]
+fn concat_vmap_tcp_maxseg_inet() {
+    concat_maxseg_verdicts("inet");
 }

@@ -262,3 +262,100 @@ fn concat_nested_dependency_keys_ip6() {
         ));
     }
 }
+
+fn check_concat_keys(lines: &[&str]) {
+    for family in ["ip", "inet"] {
+        for line in lines {
+            check(&format!(
+                "table {family} t {{
+  chain c {{
+    type filter hook input priority filter; policy accept;
+    {line}
+  }}
+}}
+"
+            ));
+        }
+    }
+}
+
+#[test]
+fn concat_shifted_components() {
+    check_concat_keys(&[
+        "ip saddr . udp dport << 1 vmap { 1.2.3.4 . 160 : drop }",
+        "ip saddr . tcp dport >> 1 vmap { 1.2.3.4 . 40 : drop }",
+        "udp dport << 1 . ip saddr vmap { 160 . 1.2.3.4 : drop }",
+        "ip saddr . udp dport << 1 . udp sport >> 1 vmap { 1.2.3.4 . 160 . 40 : drop }",
+        "ip saddr . udp dport << 1 { 1.2.3.4 . 160 }",
+        "ip saddr . meta mark << 1 vmap { 1.2.3.4 . 10 : drop }",
+        "ip saddr . ip ttl << 1 vmap { 1.2.3.4 . 128 : drop }",
+        "ip saddr . udp dport << 1 . meta mark vmap { 1.2.3.4 . 160 . 1 : drop }",
+        "ip saddr . meta mark . udp dport << 1 . ip daddr vmap { 1.2.3.4 . 1 . 160 . 5.6.7.8 : drop }",
+    ]);
+}
+
+#[test]
+fn concat_integer_exthdr_components() {
+    check_concat_keys(&[
+        "ip saddr . ip option ra value vmap { 1.2.3.4 . 5 : drop }",
+        "ip saddr . tcp option maxseg size vmap { 1.2.3.4 . 1460 : drop }",
+        "tcp option maxseg size . ip saddr vmap { 1460 . 1.2.3.4 : drop }",
+        "ip saddr . tcp option window count vmap { 1.2.3.4 . 7 : drop }",
+        "ip saddr . tcp option maxseg size . ip option ra value vmap { 1.2.3.4 . 1460 . 5 : drop }",
+    ]);
+}
+
+#[test]
+fn concat_jhash_components() {
+    check_concat_keys(&[
+        "ip saddr . jhash ip daddr mod 4 vmap { 1.2.3.4 . 1 : drop }",
+        "ip saddr . jhash ip daddr . tcp dport mod 4 vmap { 1.2.3.4 . 1 : drop }",
+        "jhash ip daddr mod 4 . ip saddr vmap { 1 . 1.2.3.4 : drop }",
+        "ip saddr . jhash ip daddr mod 4 seed 0x10 offset 2 vmap { 1.2.3.4 . 3 : drop }",
+        "ip saddr . jhash ip daddr mod 4 . tcp dport vmap { 1.2.3.4 . 1 . 80 : drop }",
+        "ip saddr . symhash mod 4 vmap { 1.2.3.4 . 1 : drop }",
+        "jhash ip daddr mod 4 . jhash ip saddr mod 8 vmap { 1 . 2 : drop }",
+        "ip saddr . jhash ip daddr mod 4 . tcp dport vmap { 1.2.3.4 . 1 . 80 : drop }",
+    ]);
+}
+
+#[test]
+fn concat_jhash_components_ip6() {
+    for family in ["ip6", "inet"] {
+        for line in [
+            "jhash ip6 daddr mod 4 . ip6 saddr vmap { 1 . ::1 : drop }",
+            "ip6 saddr . jhash ip6 daddr mod 4 vmap { ::1 . 1 : drop }",
+            "jhash ip6 daddr mod 4 . jhash ip6 saddr mod 8 vmap { 1 . 2 : drop }",
+            "jhash ip6 daddr mod 4 . jhash ip6 saddr mod 8 . ip6 saddr vmap { 1 . 2 . ::1 : drop }",
+        ] {
+            check(&format!(
+                "table {family} t {{
+  chain c {{
+    type filter hook input priority filter; policy accept;
+    {line}
+  }}
+}}
+"
+            ));
+        }
+    }
+}
+
+#[test]
+fn exthdr_and_hash_single_keys() {
+    for family in ["ip", "inet"] {
+        check(&format!(
+            "table {family} t {{
+  chain c {{
+    type filter hook input priority filter; policy accept;
+    tcp option maxseg size {{ 1400, 1460 }}
+    tcp option maxseg size vmap {{ 1400 : drop, 1460 : accept }}
+    ip option ra value {{ 1, 2 }}
+    jhash ip saddr mod 4 {{ 1, 2 }}
+    jhash ip saddr mod 4 vmap {{ 1 : drop, 2 : accept }}
+  }}
+}}
+"
+        ));
+    }
+}

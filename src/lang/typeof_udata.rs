@@ -13,10 +13,12 @@ use super::proto;
 const KIND_VALUE: u32 = 4;
 const KIND_VERDICT: u32 = 1;
 const KIND_PAYLOAD: u32 = 7;
+const KIND_EXTHDR: u32 = 8;
 const KIND_META: u32 = 9;
 const KIND_CT: u32 = 12;
 const KIND_CONCAT: u32 = 13;
 const KIND_NUMGEN: u32 = 23;
+const KIND_HASH: u32 = 24;
 const KIND_OSF: u32 = 11;
 
 fn u32_of(v: &[u8]) -> Option<u32> {
@@ -100,6 +102,13 @@ pub fn encode(exprs: &[Expr], payload_bits: impl Fn(&Expr) -> Option<u32>) -> Op
     if exprs.len() == 1 {
         return encode_one(&exprs[0], &payload_bits);
     }
+    encode_concat(exprs, payload_bits)
+}
+
+pub(super) fn encode_concat(
+    exprs: &[Expr],
+    payload_bits: impl Fn(&Expr) -> Option<u32>,
+) -> Option<Vec<u8>> {
     let mut data = udata::Udata::new();
     for (i, e) in exprs.iter().enumerate() {
         data.push(i as u8, &encode_one(e, &payload_bits)?);
@@ -150,6 +159,30 @@ fn encode_one(e: &Expr, payload_bits: &impl Fn(&Expr) -> Option<u32>) -> Option<
             KIND_NUMGEN
         }
         Expr::Osf { .. } => KIND_OSF,
+        Expr::Hash {
+            input,
+            modulus,
+            seed,
+            offset,
+        } => {
+            data.push_u32(0, u32::from(input.is_none()));
+            data.push_u32(1, *offset);
+            data.push_u32(2, *modulus);
+            data.push_u32(3, seed.unwrap_or(0));
+            data.push_u32(4, u32::from(seed.is_some()));
+            KIND_HASH
+        }
+        Expr::Exthdr {
+            desc,
+            field: Some(field),
+            exists: false,
+        } => {
+            let (op, ty, idx) = super::compile::exthdr_typeof(desc, field)?;
+            data.push_u32(1, idx);
+            data.push_u32(2, op);
+            data.push_u32(0, ty);
+            KIND_EXTHDR
+        }
         _ => return None,
     };
     let mut u = udata::Udata::new();

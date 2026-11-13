@@ -1,15 +1,5 @@
 Prefix: CRAB
 Next: 10
-### CRAB-8 · P2 · Some concatenation components compile to different element data than nft
-
-- **Area:** Language compiler
-- **Where:** `src/lang/compile.rs` (`RuleC::load`, `Expr::Concat`), `tests/lang_compile.rs`
-- **Problem:** Probing CRAB-2 against `nft --debug=netlink` found concat components whose bytecode or set element data differ from nft: `udp dport << 1` gets no byteorder conversion and the element value 160 where nft stores 0xa000; integer-typed extension-header components (`ip option ra value`, `tcp option maxseg size`) get wrong element data; `jhash` as a component gets a different register layout. A set or map keyed this way can miss entries nft would match. These are compiler observations; packet behavior was not checked.
-- **Recommendation:** Add each shape to the nft bytecode differential in `tests/lang_compile.rs`, fix the encoding to match nft, and add a packet case for the shift and exthdr keys with a drop entry and accepting fallback.
-- **Fix with:** reference-parity
-- **Effort:** M
-
-
 ### CRAB-7 · P2 · Qualify packet behavior and failed updates against nft before primary firewall use
 
 - **Area:** Firewall compatibility
