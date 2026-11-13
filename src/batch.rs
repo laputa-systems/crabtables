@@ -10,7 +10,7 @@
 //! your own I/O through [`Batch::encode`] and [`BatchResponse`].
 
 use crate::describe;
-use crate::error::{BatchError, Error, MessageError, Result};
+use crate::error::{BatchError, Error, MessageError, OutcomeUnknown, Result};
 use crate::nl::{ErrorMsg, Messages, Writer};
 use crate::objects::*;
 use crate::sys::*;
@@ -609,9 +609,9 @@ pub struct BatchOutcome {
     /// on elements of the same set (`usize::MAX` if unknown, e.g. for
     /// elements of a set created in the same batch).
     pub echoes: Vec<(usize, Object)>,
-    /// Whether some responses (echoes) were lost because the receive
-    /// buffer overflowed (or could not be decoded). The batch itself was
-    /// committed.
+    /// Whether some echoes could not be decoded. The batch itself was
+    /// committed. (Responses lost to a receive buffer overflow make the
+    /// outcome unknown instead: see [`Error::OutcomeUnknown`].)
     pub responses_lost: bool,
 }
 
@@ -647,7 +647,6 @@ pub struct BatchResponse {
     lost: bool,
     done: bool,
     sentinel_error: Option<i32>,
-    genid_before: Option<u32>,
     echo_errors: usize,
 }
 
@@ -662,7 +661,6 @@ impl BatchResponse {
             lost: false,
             done: false,
             sentinel_error: None,
-            genid_before: None,
             echo_errors: 0,
         }
     }
@@ -682,14 +680,11 @@ impl BatchResponse {
         out.extend_from_slice(w.as_bytes());
     }
 
-    /// Provide the ruleset generation observed before the batch was sent.
-    /// If responses are lost, it is used to determine whether the batch was
-    /// committed (the generation changed) or rejected with lost errors.
-    pub fn set_genid_before(&mut self, genid: Option<u32>) {
-        self.genid_before = genid;
-    }
-
-    /// Record that the socket reported `ENOBUFS` (responses were lost).
+    /// Record that the socket reported `ENOBUFS` (responses were lost). If
+    /// no rejection was seen, [`finish`](Self::finish) then reports
+    /// [`Error::OutcomeUnknown`]: the namespace-wide ruleset generation
+    /// cannot tell this batch's result from another writer's commit, and a
+    /// batch that changes nothing leaves it unchanged.
     pub fn set_lost(&mut self) {
         self.lost = true;
     }
@@ -757,81 +752,121 @@ impl BatchResponse {
         Ok(())
     }
 
-    /// Produce the final result. `batch` must be the batch this collector
-    /// was created for; it is used to describe failed operations.
-    pub fn finish(self, batch: &Batch) -> Result<BatchOutcome> {
+    /// Apply the result of one receive after the batch was sent: `r` is the
+    /// outcome of the receive call and `datagram` the data it filled in.
+    /// While `draining` (a non-blocking receive), `WouldBlock` means that no
+    /// more data is queued and `Ok(true)` is returned; otherwise it is a
+    /// timeout and an error. An error is a failure of the transport or of
+    /// decoding; pass it to [`abort`](Self::abort).
+    pub(crate) fn on_recv(
+        &mut self,
+        r: std::io::Result<usize>,
+        datagram: &[u8],
+        draining: bool,
+    ) -> Result<bool> {
+        use std::io::ErrorKind;
+        match r {
+            Ok(_) => self.feed(datagram).map(|()| false),
+            Err(e) if draining && e.kind() == ErrorKind::WouldBlock => Ok(true),
+            Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
+                self.set_lost();
+                Ok(false)
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Finish after a failure to read the responses (or to send the
+    /// sentinel) once the batch was sent. If a rejection was already seen,
+    /// the batch is known to be rolled back and it is returned (with
+    /// `responses_lost`). Otherwise the outcome is unknown and carries
+    /// `cause`.
+    pub fn abort(mut self, batch: &Batch, cause: Error) -> Error {
+        if self.errors.is_empty() {
+            return Error::OutcomeUnknown(OutcomeUnknown::new(cause));
+        }
+        self.lost = true;
+        self.rejected(batch)
+    }
+
+    fn rejected(self, batch: &Batch) -> Error {
         let op_of = |seq: u32| -> Option<usize> {
             let rel = seq.wrapping_sub(self.seq);
             (1..=self.nmsgs).contains(&rel).then(|| rel as usize - 1)
         };
-        // If responses were lost without any error being seen, the errors
-        // may have been lost: decide by whether the generation changed, if
-        // it is known.
-        let (failed_silently, outcome_unknown) = if self.lost && self.errors.is_empty() {
-            match (self.genid_before, self.genid) {
-                (Some(before), Some(after)) => (before == after, false),
-                _ => (true, true),
-            }
-        } else {
-            (false, false)
-        };
-        if !self.errors.is_empty() || failed_silently {
-            let mut errors = Vec::with_capacity(self.errors.len());
-            for RawError {
-                seq,
-                errno,
-                message,
-                offset: off,
-                miss_type,
-                missing,
-            } in self.errors
-            {
-                let me = match op_of(seq) {
-                    Some(mi) => {
-                        let meta = batch.msgs[mi];
-                        let bytes = batch.msg_bytes(mi);
-                        MessageError {
-                            index: Some(meta.op),
-                            errno,
-                            message,
-                            operation: describe::operation(bytes),
-                            location: off.map(|o| {
-                                describe::locate(
-                                    bytes,
-                                    o as usize,
-                                    meta.elem_base,
-                                    missing,
-                                    miss_type,
-                                )
-                            }),
-                        }
-                    }
-                    None => MessageError {
-                        index: None,
+        let mut errors = Vec::with_capacity(self.errors.len());
+        for RawError {
+            seq,
+            errno,
+            message,
+            offset: off,
+            miss_type,
+            missing,
+        } in self.errors
+        {
+            let me = match op_of(seq) {
+                Some(mi) => {
+                    let meta = batch.msgs[mi];
+                    let bytes = batch.msg_bytes(mi);
+                    MessageError {
+                        index: Some(meta.op),
                         errno,
                         message,
-                        operation: if seq == self.seq {
-                            "batch begin".into()
-                        } else {
-                            "batch end".into()
-                        },
-                        location: None,
+                        operation: describe::operation(bytes),
+                        location: off.map(|o| {
+                            describe::locate(bytes, o as usize, meta.elem_base, missing, miss_type)
+                        }),
+                    }
+                }
+                None => MessageError {
+                    index: None,
+                    errno,
+                    message,
+                    operation: if seq == self.seq {
+                        "batch begin".into()
+                    } else {
+                        "batch end".into()
                     },
-                };
-                errors.push(me);
-            }
-            return Err(Error::Batch(BatchError {
-                errors,
-                responses_lost: self.lost,
-                outcome_unknown,
-            }));
+                    location: None,
+                },
+            };
+            errors.push(me);
+        }
+        Error::Batch(BatchError {
+            errors,
+            responses_lost: self.lost,
+        })
+    }
+
+    /// Produce the final result. `batch` must be the batch this collector
+    /// was created for; it is used to describe failed operations.
+    ///
+    /// Success requires that nothing was lost and that the sentinel
+    /// succeeded. A rejection that was seen is [`Error::Batch`]. Anything
+    /// else that leaves the result open (lost responses without a seen
+    /// rejection, a failed sentinel) is [`Error::OutcomeUnknown`].
+    pub fn finish(self, batch: &Batch) -> Result<BatchOutcome> {
+        if !self.errors.is_empty() {
+            return Err(self.rejected(batch));
         }
         if let Some(e) = self.sentinel_error {
-            return Err(Error::Kernel(crate::error::KernelError {
-                errno: e,
-                message: None,
-            }));
+            return Err(Error::OutcomeUnknown(OutcomeUnknown::new(Error::Kernel(
+                crate::error::KernelError {
+                    errno: e,
+                    message: None,
+                },
+            ))));
         }
+        if self.lost {
+            return Err(Error::OutcomeUnknown(OutcomeUnknown::new(Error::Io(
+                std::io::Error::from_raw_os_error(libc::ENOBUFS),
+            ))));
+        }
+        let op_of = |seq: u32| -> Option<usize> {
+            let rel = seq.wrapping_sub(self.seq);
+            (1..=self.nmsgs).contains(&rel).then(|| rel as usize - 1)
+        };
         let echoes = self
             .echoes
             .into_iter()
@@ -844,7 +879,7 @@ impl BatchResponse {
         Ok(BatchOutcome {
             genid: self.genid.unwrap_or(0),
             echoes,
-            responses_lost: self.lost || self.echo_errors > 0,
+            responses_lost: self.echo_errors > 0,
         })
     }
 }
@@ -852,6 +887,7 @@ impl BatchResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{err_msg, newgen_msg};
 
     #[test]
     fn elements_are_split() {
@@ -883,48 +919,151 @@ mod tests {
         assert_eq!(n, 20000);
     }
 
-    /// Decide the outcome when responses were lost (sans-IO).
+    fn feed_all(r: &mut BatchResponse, datagrams: &[Vec<u8>]) {
+        for d in datagrams {
+            r.feed(d).unwrap();
+        }
+    }
+
+    fn unknown(r: Result<BatchOutcome>) -> Error {
+        let e = r.expect_err("must not be reported as success");
+        assert!(e.is_outcome_unknown(), "{e:?}");
+        assert!(e.as_batch().is_none());
+        assert!(e.errno().is_none());
+        assert!(!e.is_not_found() && !e.is_exists() && !e.is_generation_mismatch());
+        assert!(e.to_string().contains("outcome unknown"), "{e}");
+        e
+    }
+
+    fn cause(e: &Error) -> &Error {
+        e.as_outcome_unknown().unwrap().cause()
+    }
+
+    fn setup() -> (Batch, Vec<u8>) {
+        (crate::testutil::one_table_batch(), Vec::new())
+    }
+
     #[test]
-    fn lost_responses() {
-        let mut b = Batch::new();
-        b.add_table(&Table::new(Family::Inet, "a"));
-        let mut out = Vec::new();
-        let gen_msg = |r: &BatchResponse, id: u32| {
-            let mut w = Writer::new();
-            let ty = (u16::from(NFNL_SUBSYS_NFTABLES) << 8) | u16::from(NFT_MSG_NEWGEN);
-            let m = w.begin_msg(ty, 0, r.sentinel_seq(), 0, 0);
-            w.put_be32(NFTA_GEN_ID, id);
-            w.end_msg(m);
-            w.into_bytes()
-        };
-        // Generation unchanged: the batch failed, its errors were lost.
+    fn confirmed_success() {
+        let (b, mut out) = setup();
         let mut r = b.encode(&mut out, 1).unwrap();
-        r.set_genid_before(Some(5));
-        r.set_lost();
-        r.feed(&gen_msg(&r, 5)).unwrap();
+        feed_all(&mut r, &[err_msg(2, 2, 0), newgen_msg(4, 6)]);
         assert!(r.is_done());
+        let o = r.finish(&b).unwrap();
+        assert_eq!(o.genid, 6);
+        assert!(!o.responses_lost);
+    }
+
+    #[test]
+    fn rejection_is_reported_as_rejection() {
+        let (b, mut out) = setup();
+        let mut r = b.encode(&mut out, 1).unwrap();
+        feed_all(
+            &mut r,
+            &[err_msg(2, 2, libc::ENOENT), newgen_msg(4, 5)],
+        );
         match r.finish(&b) {
             Err(Error::Batch(e)) => {
-                assert!(e.responses_lost && e.errors.is_empty() && !e.outcome_unknown)
+                assert_eq!(e.errors.len(), 1);
+                assert!(!e.responses_lost);
             }
             x => panic!("{x:?}"),
         }
-        // Generation changed: committed, some echoes lost.
+    }
+
+    /// The kernel generation is namespace wide: a rejected batch whose
+    /// error was lost looks the same as a committed batch, or as another
+    /// writer's commit, and must not be reported as either.
+    #[test]
+    fn lost_responses_with_generation_change_are_unknown() {
+        for gen_after in [5, 6] {
+            let (b, mut out) = setup();
+            let mut r = b.encode(&mut out, 1).unwrap();
+            r.set_lost();
+            r.feed(&newgen_msg(4, gen_after)).unwrap();
+            assert!(r.is_done());
+            match cause(&unknown(r.finish(&b))) {
+                Error::Io(e) => assert_eq!(e.raw_os_error(), Some(libc::ENOBUFS)),
+                x => panic!("{x:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn lost_echoes_of_a_committed_batch_are_unknown() {
+        let (mut b, mut out) = setup();
+        b.set_echo(true);
         let mut r = b.encode(&mut out, 1).unwrap();
-        r.set_genid_before(Some(5));
         r.set_lost();
-        r.feed(&gen_msg(&r, 6)).unwrap();
-        let o = r.finish(&b).unwrap();
-        assert!(o.responses_lost);
-        assert_eq!(o.genid, 6);
-        // No information: reported as unknown (error).
+        feed_all(&mut r, &[err_msg(2, 2, 0), newgen_msg(4, 6)]);
+        unknown(r.finish(&b));
+    }
+
+    #[test]
+    fn rejection_seen_before_loss_stays_a_rejection() {
+        let (b, mut out) = setup();
         let mut r = b.encode(&mut out, 1).unwrap();
+        r.feed(&err_msg(2, 2, libc::ENOENT)).unwrap();
         r.set_lost();
-        r.feed(&gen_msg(&r, 6)).unwrap();
+        r.feed(&newgen_msg(4, 5)).unwrap();
         match r.finish(&b) {
-            Err(Error::Batch(e)) => assert!(e.outcome_unknown),
+            Err(Error::Batch(e)) => assert!(e.responses_lost && e.errors.len() == 1),
             x => panic!("{x:?}"),
         }
+    }
+
+    #[test]
+    fn failed_sentinel_is_unknown() {
+        let (b, mut out) = setup();
+        let mut r = b.encode(&mut out, 1).unwrap();
+        let s = 4;
+        feed_all(&mut r, &[err_msg(2, 2, 0), err_msg(s, s, libc::EPERM)]);
+        assert!(r.is_done());
+        match cause(&unknown(r.finish(&b))) {
+            Error::Kernel(k) => assert_eq!(k.errno, libc::EPERM),
+            x => panic!("{x:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_reply_is_unknown_unless_rejection_was_seen() {
+        let (b, mut out) = setup();
+        let mut truncated = err_msg(2, 2, 0);
+        truncated.truncate(30);
+
+        let mut r = b.encode(&mut out, 1).unwrap();
+        let e = r.feed(&truncated).unwrap_err();
+        assert!(matches!(e, Error::Malformed(_)), "{e:?}");
+        let e = r.abort(&b, e);
+        assert!(e.is_outcome_unknown() && e.as_batch().is_none(), "{e:?}");
+        assert!(matches!(e.as_outcome_unknown().unwrap().cause(), Error::Malformed(_)));
+
+        let mut r = b.encode(&mut out, 1).unwrap();
+        r.feed(&err_msg(2, 2, libc::ENOENT)).unwrap();
+        let e = r.feed(&truncated).unwrap_err();
+        match r.abort(&b, e) {
+            Error::Batch(e) => assert!(e.responses_lost && e.errors.len() == 1),
+            x => panic!("{x:?}"),
+        }
+    }
+
+    #[test]
+    fn receive_failures_after_send_are_unknown() {
+        use std::io::{Error as IoError, ErrorKind};
+        let (b, mut out) = setup();
+        for kind in [ErrorKind::ConnectionReset, ErrorKind::InvalidData, ErrorKind::WouldBlock] {
+            let mut r = b.encode(&mut out, 1).unwrap();
+            let e = r.on_recv(Err(IoError::from(kind)), &[], false).unwrap_err();
+            let e = r.abort(&b, e);
+            let u = e.as_outcome_unknown().expect("unknown outcome");
+            assert!(matches!(u.cause(), Error::Io(i) if i.kind() == kind));
+        }
+        let mut r = b.encode(&mut out, 1).unwrap();
+        assert!(r.on_recv(Err(IoError::from(ErrorKind::WouldBlock)), &[], true).unwrap());
+        assert!(!r.on_recv(Err(IoError::from_raw_os_error(libc::ENOBUFS)), &[], false).unwrap());
+        assert!(!r.on_recv(Err(IoError::from(ErrorKind::Interrupted)), &[], false).unwrap());
+        r.feed(&newgen_msg(4, 5)).unwrap();
+        unknown(r.finish(&b));
     }
 
     #[test]

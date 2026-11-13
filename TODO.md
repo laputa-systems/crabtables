@@ -30,16 +30,6 @@ Next: 8
 - **Effort:** S
 
 
-### CRAB-4 · P2 · Commit recovery confuses lost responses with a known transaction outcome
-
-- **Area:** Transaction outcome reporting
-- **Where:** `src/batch.rs:685`, `src/batch.rs:770`, `src/batch.rs:912`, `src/socket.rs:267`, `src/socket.rs:290`, `src/asynchronous.rs:134`, `src/error.rs:135`
-- **Problem:** With lost responses and no retained error, BatchResponse treats any generation change as proof that this batch committed. GETGEN reports the namespace-wide generation, so a different writer can advance it while this batch is rejected and its error is lost. The existing lost_responses test asserts success for that indistinguishable sequence. Post-send receive, decode, and sentinel errors also escape as ordinary errors even though changes may already be applied. The kernel generation scope and source paths were checked; transport-fault reproduction is unproven here.
-- **Recommendation:** Return an explicit unknown outcome whenever the available responses cannot establish this batch's result, preserving the transport cause. Do not infer authorship from a generation delta or promise rollback after a post-send failure. Extend collector and sync/async boundary tests with a rejected batch plus another writer's commit, lost errors/echoes, truncated replies, and a failed sentinel; prove callers cannot mistake unknown for confirmed success or safe-to-retry rejection.
-- **Fix with:** error-model
-- **Effort:** M
-
-
 ### CRAB-5 · P2 · A valid zero-length network prefix produces kernel-invalid expressions
 
 - **Area:** Typed rule builder

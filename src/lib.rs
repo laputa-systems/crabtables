@@ -23,6 +23,8 @@ pub mod nl;
 mod objects;
 pub mod proto;
 mod socket;
+#[cfg(test)]
+mod testutil;
 pub mod sys;
 mod types;
 pub mod udata;
@@ -32,7 +34,9 @@ pub use asynchronous::{AsyncMonitor, AsyncNflogSocket, AsyncNfqSocket, AsyncSock
 pub use batch::{Batch, BatchOutcome, BatchResponse};
 pub use builder::{CtDir, Field, IntoValue, RuleBuilder, concat_key, concat_len, limit_expr};
 pub use client::ResetDump;
-pub use error::{BatchError, Error, ErrorLocation, KernelError, MessageError, Result};
+pub use error::{
+    BatchError, Error, ErrorLocation, KernelError, MessageError, OutcomeUnknown, Result,
+};
 pub use expr::Expr;
 pub use objects::*;
 pub use proto::Ruleset;

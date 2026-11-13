@@ -14,8 +14,10 @@ a sans-IO core for any other runtime.
 ## Modules
 
 * **crate root**: sockets, atomic `Batch`es with precise per-operation
-  errors, typed tables/chains/rules/sets/objects/flowtables, `RuleBuilder`,
-  ruleset snapshots, counters with reset.
+  errors (and an explicit `Error::OutcomeUnknown` when the responses cannot
+  show whether a batch was applied), typed
+  tables/chains/rules/sets/objects/flowtables, `RuleBuilder`, ruleset
+  snapshots, counters with reset.
 * **`expr`**: typed kernel expressions, with unknown expressions preserved as raw data.
 * **`proto`**: the sans-IO request/response core.
 * **`monitor`**: ruleset change notifications and packet traces.
