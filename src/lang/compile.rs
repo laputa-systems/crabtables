@@ -403,6 +403,21 @@ impl Compiler {
         }
     }
 
+    /// Forget the tables of `family` (any if `None`) named `table` (all if
+    /// `None`), with their chains and sets: a later command or query must
+    /// not find what the batch removes.
+    fn forget_tables(&mut self, family: Option<Family>, table: Option<&str>) {
+        let gone = |f: Family, t: &str| {
+            family.is_none_or(|x| x == f) && table.is_none_or(|x| x == t)
+        };
+        self.tables.retain(|(f, t)| !gone(*f, t));
+        self.chain_order.retain(|(f, t, _)| !gone(*f, t));
+        self.chains.retain(|(f, t, _), _| !gone(*f, t));
+        self.sets.retain(|(f, t, _), _| !gone(*f, t));
+        self.bases.retain(|(f, t, _), _| !gone(*f, t));
+        self.rule_handles.retain(|(f, t, _), _| !gone(*f, t));
+    }
+
     fn add_chain_name(&mut self, family: Family, table: &str, name: &str, handle: Option<u64>) {
         let k = (family, table.to_owned(), name.to_owned());
         if self.chains.insert(k.clone(), handle).is_none() {
@@ -546,7 +561,17 @@ impl Compiler {
                     self.check_query(Some(*kind), *all, target, suggest)
                 }
                 Cmd::Describe(_) | Cmd::Monitor { .. } => Ok(()),
-                Cmd::Element { op, .. } if op == "get" || op == "reset" => Ok(()),
+                Cmd::Element {
+                    op,
+                    family,
+                    table,
+                    set,
+                    table_span,
+                    set_span,
+                    ..
+                } if op == "get" || op == "reset" => {
+                    self.check_element_query(*family, table, set, *table_span, *set_span)
+                }
                 c => self.cmd(c, *span),
             };
             if let Err(e) = r {
@@ -564,6 +589,31 @@ impl Compiler {
             }
         }
         errors
+    }
+
+    /// The table and set a `get element` or `reset element` command names
+    /// must be known.
+    fn check_element_query(
+        &self,
+        family: Family,
+        table: &str,
+        set: &str,
+        table_span: Span,
+        set_span: Span,
+    ) -> Result<()> {
+        if !self.known {
+            return Ok(());
+        }
+        if !self.tables.contains(&(family, table.to_owned())) {
+            return Err(Error::at("No such file or directory", table_span));
+        }
+        if !self
+            .sets
+            .contains_key(&(family, table.to_owned(), set.to_owned()))
+        {
+            return Err(Error::at("No such file or directory", set_span));
+        }
+        Ok(())
     }
 
     /// The table (and object) a `list` or `reset` command names must be
@@ -1406,6 +1456,9 @@ impl Compiler {
                 _ => {}
             }
         }
+        if kind == ObjKind::Table && t.handle.is_none() {
+            self.forget_tables(Some(f), Some(table));
+        }
         let b = &mut self.batch;
         let op = match kind {
             ObjKind::Table => match (t.handle, destroy) {
@@ -1458,6 +1511,9 @@ impl Compiler {
         // (A missing table is left to the kernel.)
         if kind == Some(ObjKind::Chain) {
             self.check_chain(f, table, name)?;
+        }
+        if kind.is_none() {
+            self.forget_tables(t.family.filter(|f| *f != Family::Unspec), None);
         }
         let op = match kind {
             None => self.batch.flush_ruleset(t.family.unwrap_or(Family::Unspec)),

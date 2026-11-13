@@ -1,15 +1,5 @@
 Prefix: CRAB
-Next: 9
-### CRAB-1 · P1 · Query commands split one input file into independently committed updates
-
-- **Area:** CLI atomicity
-- **Where:** `cli/src/main.rs:583`, `cli/src/main.rs:628`, `src/lang/compile.rs:883`, `tests/errors.rs:17`
-- **Problem:** The CLI commits pending mutations before each query and starts a fresh batch afterward. In a namespace with an installed firewall, a file containing `flush ruleset; list ruleset; add table ip probe; add chain ip probe bad { type nat hook forward priority 0; }` passes the compiler's hook/type checks, commits the flush, then fails the final batch because NAT does not support the forward hook. The old firewall remains removed. Source trace reaches the kernel's hook-mask rejection in [Linux v6.12](https://github.com/torvalds/linux/blob/v6.12/net/netfilter/nf_tables_api.c#L2345); runtime reproduction is unproven in this review environment.
-- **Recommendation:** Keep all mutations from one input in one kernel transaction. Define query output against the evaluated ruleset, or reject a mixed input before any mutation if its query cannot be supported atomically. Add an nft/nfcrt differential case with a restrictive initial ruleset and a kernel-invalid final command separated by list, asserting failure preserves the original ruleset and packet policy. Cover stdin, file includes, JSON, and successful mixed inputs through the same boundary.
-- **Fix with:** error-model
-- **Effort:** M
-
-
+Next: 10
 ### CRAB-8 · P2 · Some concatenation components compile to different element data than nft
 
 - **Area:** Language compiler
@@ -39,6 +29,16 @@ Next: 9
 - **Fix with:** test-audit
 - **Effort:** L
 - **Design:** [Draft RFC](docs/rfc/CRAB-7-nft-differential-qualification.md)
+
+
+### CRAB-9 · P3 · monitor_trace fails intermittently on unmatched packet shapes
+
+- **Area:** Test reliability
+- **Where:** `cli/tests/compat.rs` (`monitor_trace`)
+- **Problem:** The test tolerates extra nfcrt trace lines only when their shape matches a line nft printed. When nfcrt's run catches a packet kind nft's run missed (observed: a TCP RST to a closed port, with its `in`/`out` packet, policy and drop-rule lines), the test fails. It failed 2 of 3 runs at `289be0d`, before the CRAB-1..5 fixes, so the failure is in the test, not the trace decoder.
+- **Recommendation:** Make the traffic deterministic for both runs (send the same fixed packet set after both monitors are ready, and wait for the expected count) instead of widening the shape tolerance; keep the nft equality check on every line.
+- **Fix with:** root-cause
+- **Effort:** S
 
 
 ### CRAB-6 · P3 · Replacing a concatenated set key leaves its concatenation flag set
