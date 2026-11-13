@@ -1,5 +1,5 @@
 Prefix: CRAB
-Next: 10
+Next: 11
 ### CRAB-7 · P2 · Qualify packet behavior and failed updates against nft before primary firewall use
 
 - **Area:** Firewall compatibility
@@ -19,6 +19,16 @@ Next: 10
 - **Recommendation:** Make the traffic deterministic for both runs (send the same fixed packet set after both monitors are ready, and wait for the expected count) instead of widening the shape tolerance; keep the nft equality check on every line.
 - **Fix with:** root-cause
 - **Effort:** S
+
+
+### CRAB-10 · P3 · Remaining nft differences in shifted sets, ip option types and typeof
+
+- **Area:** Language compiler
+- **Where:** `src/lang/compile.rs` (`expr_comp`, `exthdr_typeof`, `Expr::Concat` loading)
+- **Problem:** Found while fixing CRAB-8: a single-key shifted set (`udp dport << 1 { 160, 162 }`) keeps the shift in the rule where nft folds it into the constants; `ip option <name> type` fields get key type 263 (integer) where nft uses 2503; named sets reject `typeof tcp option maxseg size` ("unsupported typeof expression") which nft accepts; nft aborts on `jhash` in concats of eight or more words where crabtables has no matching limit; `jhash` inputs in concats whose width `static_words` cannot predict (rt, socket, fib components) keep the old `word+4` placement. Verdict impact of the first and last is unverified.
+- **Recommendation:** Add each to the nft differential in `tests/lang_compile.rs`, match nft's bytecode and set metadata, and add a packet case for the shifted single-key set and a jhash concat with an unpredictable-width component.
+- **Fix with:** reference-parity
+- **Effort:** M
 
 
 ### CRAB-6 · P3 · Replacing a concatenated set key leaves its concatenation flag set
