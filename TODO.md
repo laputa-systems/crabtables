@@ -1,5 +1,5 @@
 Prefix: CRAB
-Next: 8
+Next: 9
 ### CRAB-1 · P1 · Query commands split one input file into independently committed updates
 
 - **Area:** CLI atomicity
@@ -10,13 +10,13 @@ Next: 8
 - **Effort:** M
 
 
-### CRAB-2 · P1 · Nested protocol expressions overwrite earlier concatenated key components
+### CRAB-8 · P2 · Some concatenation components compile to different element data than nft
 
 - **Area:** Language compiler
-- **Where:** `src/lang/compile.rs:1494`, `src/lang/compile.rs:2777`, `src/lang/compile.rs:2825`, `src/lang/compile.rs:3030`, `src/lang/compile.rs:3441`, `src/lang/parse.rs:2871`
-- **Problem:** The concatenation dependency prepass visits only direct Payload children. For `ip saddr . tcp dport and 255 vmap { 1.2.3.4 . 80 : drop }` in an IPv4 chain, the address is loaded into R1 before the nested Binop loads tcp dport. That load emits its l4proto dependency into R1, overwriting the address before the lookup. The drop entry is missed, so an accepting fallback can allow traffic the rule intended to block. The parser accepts this operand shape and merge_payload_cmps does not repair the overwrite. This is a source trace; compilation and packet reproduction remain unproven here.
-- **Recommendation:** Collect dependencies recursively before loading any concatenation component, or allocate dependency scratch registers outside live key registers. Add a compiler differential and a paired packet case for this exact key with a drop entry and accepting fallback, plus positive and negative address/port controls. Cover nested bit operations and other supported nested expressions while retaining the direct-payload prepass behavior.
-- **Fix with:** make-invalid-states-unrepresentable
+- **Where:** `src/lang/compile.rs` (`RuleC::load`, `Expr::Concat`), `tests/lang_compile.rs`
+- **Problem:** Probing CRAB-2 against `nft --debug=netlink` found concat components whose bytecode or set element data differ from nft: `udp dport << 1` gets no byteorder conversion and the element value 160 where nft stores 0xa000; integer-typed extension-header components (`ip option ra value`, `tcp option maxseg size`) get wrong element data; `jhash` as a component gets a different register layout. A set or map keyed this way can miss entries nft would match. These are compiler observations; packet behavior was not checked.
+- **Recommendation:** Add each shape to the nft bytecode differential in `tests/lang_compile.rs`, fix the encoding to match nft, and add a packet case for the shift and exthdr keys with a drop entry and accepting fallback.
+- **Fix with:** reference-parity
 - **Effort:** M
 
 

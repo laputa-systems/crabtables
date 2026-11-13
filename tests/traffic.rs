@@ -634,3 +634,118 @@ fn zero_length_prefix_matches_its_family() {
     check(5206, a6, &[a6], &[false], "ip6 saddr 8000::/1");
     check(5207, a6, &[a6], &[true], "ip6 saddr ::/1");
 }
+
+/// Whether a TCP connection from `src` to `dst` completes within `timeout_ms`.
+#[cfg(feature = "lang")]
+fn tcp_connects_from(src: Ipv4Addr, dst: std::net::SocketAddrV4, timeout_ms: i32) -> bool {
+    let addr = |a: &std::net::SocketAddrV4| libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: a.port().to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(a.ip().octets()),
+        },
+        sin_zero: [0; 8],
+    };
+    let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let src = addr(&std::net::SocketAddrV4::new(src, 0));
+    let dst = addr(&dst);
+    // SAFETY: plain socket calls on a descriptor owned here and valid sockaddr pointers.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0);
+        assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+        let r = libc::bind(fd, (&raw const src).cast(), len);
+        assert_eq!(r, 0, "bind: {}", std::io::Error::last_os_error());
+        let r = libc::connect(fd, (&raw const dst).cast(), len);
+        let ok = if r == 0 {
+            true
+        } else {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINPROGRESS)
+            );
+            let mut p = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let mut err: libc::c_int = 0;
+            let mut elen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            libc::poll(&mut p, 1, timeout_ms) == 1
+                && libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut err).cast(),
+                    &mut elen,
+                ) == 0
+                && err == 0
+        };
+        libc::close(fd);
+        ok
+    }
+}
+
+#[cfg(feature = "lang")]
+fn concat_key_verdicts(family: &str, ports: [u16; 3]) {
+    netns();
+    let script = format!(
+        "table {family} t {{
+  chain out {{
+    type filter hook output priority filter; policy accept;
+    ip saddr . tcp dport and 255 vmap {{ 127.0.0.2 . 80 : drop }}
+    accept
+  }}
+}}
+"
+    );
+    let cmds = crabtables::lang::parse::parse(&script)
+        .unwrap_or_else(|e| panic!("parse: {}", e.render(&script, Some("script"))));
+    let mut c = crabtables::lang::compile::Compiler::new();
+    c.compile(&cmds)
+        .unwrap_or_else(|e| panic!("compile: {}", e.render(&script, Some("script"))));
+    let (batch, _) = c.into_batch();
+    Socket::new().unwrap().commit(&batch).unwrap();
+
+    let [hit, other, masked] = ports;
+    let _l: Vec<TcpListener> = [hit, other, masked]
+        .iter()
+        .map(|p| TcpListener::bind((Ipv4Addr::LOCALHOST, *p)).unwrap())
+        .collect();
+    let to = |p: u16| std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, p);
+    let listed = Ipv4Addr::new(127, 0, 0, 2);
+    let unlisted = Ipv4Addr::new(127, 0, 0, 3);
+
+    assert!(!tcp_connects_from(listed, to(hit), 400), "listed key");
+    assert!(
+        tcp_connects_from(listed, to(other), 2000),
+        "listed address, other port"
+    );
+    assert!(
+        tcp_connects_from(unlisted, to(hit), 2000),
+        "other address, listed port"
+    );
+    assert!(
+        tcp_connects_from(unlisted, to(other), 2000),
+        "other address and port"
+    );
+    assert!(
+        tcp_connects_from(Ipv4Addr::LOCALHOST, to(hit), 2000),
+        "loopback source, listed port"
+    );
+    assert!(
+        !tcp_connects_from(listed, to(masked), 400),
+        "port reduced to the listed one by the key mask"
+    );
+}
+
+#[cfg(feature = "lang")]
+#[test]
+fn concat_vmap_nested_bitop_ip() {
+    concat_key_verdicts("ip", [80, 81, 336]);
+}
+
+#[cfg(feature = "lang")]
+#[test]
+fn concat_vmap_nested_bitop_inet() {
+    concat_key_verdicts("inet", [80, 81, 336]);
+}
