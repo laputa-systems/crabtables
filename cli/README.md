@@ -1,14 +1,13 @@
 # 🦀 nfcrt
 
 [![crates.io](https://img.shields.io/crates/v/nfcrt.svg)](https://crates.io/crates/nfcrt)
-[![CI](https://github.com/finnbear/crabtables/actions/workflows/ci.yml/badge.svg)](https://github.com/finnbear/crabtables/actions/workflows/ci.yml)
+[![CI](https://github.com/laputa-systems/crabtables/actions/workflows/ci.yml/badge.svg)](https://github.com/laputa-systems/crabtables/actions/workflows/ci.yml)
 
-A pure-Rust nftables command line tool, compatible with `nft`. It has no C
+A pure-Rust nftables command line tool targeting `nft` compatibility. It has no C
 dependencies (no libnftables, libnftnl, or libmnl) and is built on
 [crabtables](https://crates.io/crates/crabtables).
 
-It accepts the same commands, rulesets and options as `nft`, and prints the
-same output, errors, and JSON:
+It accepts nft syntax and supports text and JSON input/output. Examples:
 
 ```sh
 nfcrt add table inet filter
@@ -20,48 +19,26 @@ nfcrt -j list ruleset
 nfcrt monitor
 ```
 
-The only `nft` option it doesn't support is `-o`/`--optimize`.
+`-o`/`--optimize` is unsupported. The compatibility tests cover a substantial
+corpus, but do not establish equivalence for every expression or transaction.
+Read the [qualification status](https://github.com/laputa-systems/crabtables/blob/main/README.md#compatibility-and-qualification)
+and [open findings](https://github.com/laputa-systems/crabtables/blob/main/TODO.md)
+before using it as a primary firewall frontend.
 
-## 📦 Installation
+## Installation
 
-Install it system-wide, where `sudo` finds it:
+Follow the [installation and capability instructions](https://github.com/laputa-systems/crabtables/blob/main/README.md#nfcrt).
+They distinguish the published package from installing this checkout.
 
-```sh
-sudo cargo install --root /usr/local nfcrt
-```
+## Performance
 
-Like `nft`, it needs `CAP_NET_ADMIN`. You can instead install it for your
-user and grant that capability to the binary, so it runs without `sudo`.
-Everyone who can execute the binary then gets the capability, and the binary's
-file system must not be mounted `nosuid`:
+See the [historical measurements and benchmark harness](https://github.com/laputa-systems/crabtables/blob/main/README.md#performance).
 
-```sh
-cargo install nfcrt
-sudo setcap cap_net_admin+ep ~/.cargo/bin/nfcrt
-```
+## How it was made
 
-## 🏎️ Performance
+See the [project origin and existing test command](https://github.com/laputa-systems/crabtables/blob/main/README.md#how-it-was-made).
 
-Medians of three runs: release build, nftables 1.1.3, kernel 6.12.
-
-| operation                 | `nfcrt` | `nft`  |
-|---------------------------|--------:|-------:|
-| load 200 000 set elements |  608 ms | 917 ms |
-| list 200 000 set elements |  1.94 s | 3.33 s |
-| load 20 000 rules         |  443 ms | 533 ms |
-| list 20 000 rules         |  188 ms | 407 ms |
-| single-rule transaction   |  1.7 ms | 3.2 ms |
-
-## 🔬 How it was made
-
-Written by Claude Opus 5.5 from roughly 30 prompts with moderate guidance.
-A black-box reimplementation: no libnftnl, libmnl, or nftables source was
-used. Interoperability comes from the kernel's UAPI header information
-(constants are checked against the headers) and from comparing behavior with
-the `nft` tool and the kernel. Tests need root and run in throwaway network
-namespaces (`sudo cargo test --workspace --all-features`).
-
-## ⚖️ License
+## License
 
 Licensed under either of
 
@@ -74,7 +51,7 @@ Licensed under either of
 
 at your option.
 
-## 🤝 Contribution
+## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be

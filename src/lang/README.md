@@ -2,8 +2,7 @@ The nftables language (feature `lang`): nft scripts and commands in, kernel
 objects out, and back.
 
 * [`parse`]: parser of nft syntax into an [`ast`].
-* [`compile`]: compiler of commands to a [`Batch`](crate::Batch), with the
-  same bytecode as `nft`.
+* [`compile`]: compiler of supported commands to a [`Batch`](crate::Batch).
 * [`decompile`] and [`print`](mod@print): rulesets back to the AST and to the text of
   `nft list`; [`list`] runs `list` commands.
 * `json` (feature `lang_json`): nft's JSON format (`nft -j`), in both
