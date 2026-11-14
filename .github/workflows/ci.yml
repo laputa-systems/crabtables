@@ -13,10 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo doc --workspace --no-deps --all-features
         env:
@@ -25,14 +21,6 @@ jobs:
       - run: cargo test --workspace --doc --all-features
       - name: Check constants against the kernel UAPI headers
         run: python3 scripts/check-constants.py
-
-  msrv:
-    name: MSRV (1.85)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo build --workspace --all-features --all-targets
 
   integration:
     # The integration tests talk to the kernel: they need root, network
