@@ -1,5 +1,15 @@
 Prefix: CRAB
-Next: 11
+Next: 12
+### CRAB-11 · P2 · NAT statements accept or encode forms nft treats differently
+
+- **Area:** Language compiler
+- **Where:** `src/lang/compile.rs` (`nat()`, tproxy)
+- **Problem:** Found while fixing the CRAB-7 divergences: `dnat to 1.2.3.4:80` without a preceding transport protocol match compiles in nfcrt, while nft rejects it (a port translation without a protocol dependency); `tproxy to :80` in an `inet` table is sent with family `inet` where nft sends an unspecified family, so bytecode differs and the listing reads `tproxy ip to :80`. Packet impact is unverified.
+- **Recommendation:** Reject port NAT without a transport dependency with nft's diagnostic, encode the unspecified tproxy family as nft does, and add both to the nft differential and the qualification NAT row.
+- **Fix with:** reference-parity
+- **Effort:** S
+
+
 ### CRAB-7 · P2 · Qualify packet behavior and failed updates against nft before primary firewall use
 
 - **Area:** Firewall compatibility
