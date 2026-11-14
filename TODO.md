@@ -1,5 +1,15 @@
 Prefix: CRAB
-Next: 13
+Next: 14
+### CRAB-13 · P2 · More expression forms diverge from nft's accept/reject rules
+
+- **Area:** Language parser and compiler
+- **Where:** `src/lang/parse.rs`, `src/lang/compile.rs`
+- **Problem:** Found while fixing CRAB-12, each checked against nft 1.1.3: `tcp dport 1 udp dport 2`, and `dnat to 1.2.3.4:udp dport` after a `tcp` match, are accepted where nft reports `conflicting transport layer protocols specified: tcp vs. udp`; hyphenated symbolic ranges (`meta l4proto tcp-udp`, `tcp dport http-https`) are accepted where nft rejects them; `icmpv6 type` in an `ip` table is rejected where nft accepts it; a `meta l4proto` set mixing a value and a range (`{ 6, 17-20 }`) gets different key byte-order user data; `snat to ip saddr:tcp sport` does not parse; `redirect to 80-90:5`, `redirect to ip saddr:80`, `fwd` and `synproxy` diagnostics differ. Accepting a rule nft rejects can install a policy that matches nothing.
+- **Recommendation:** Track the transport protocol as CRAB-12 tracks the network protocol and reject conflicts with nft's diagnostic; reject hyphenated symbolic ranges; then fix the remaining parse and diagnostic gaps, each in the `cli/tests/compat.rs` nft differential.
+- **Fix with:** reference-parity
+- **Effort:** M
+
+
 ### CRAB-7 · P2 · Qualify packet behavior and failed updates against nft before primary firewall use
 
 - **Area:** Firewall compatibility
