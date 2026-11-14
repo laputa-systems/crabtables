@@ -140,6 +140,8 @@ table inet t {
     tcp dport 1 dnat ip6 to [fd00:2::2]:80
     tcp dport 2 dnat ip to 1.2.3.4:80
     dnat ip6 to fd00:2::2
+    tcp dport 3 dnat to :80
+    tcp dport 4 redirect to :80
   }
   chain mangle {
     type filter hook prerouting priority mangle; policy accept;
@@ -147,6 +149,8 @@ table inet t {
     meta l4proto tcp tproxy ip6 to [fd00::5]
     meta l4proto tcp tproxy ip to 1.2.3.4:80
     meta l4proto tcp tproxy ip6 to :80
+    meta l4proto tcp tproxy to :80
+    tcp dport 9 tproxy to :80
   }
 }
 ",

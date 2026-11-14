@@ -1910,9 +1910,11 @@ impl Dec<'_, '_> {
                 );
                 let port = self.arg(t.reg_port, id::INET_SERVICE, 16, true);
                 let family = match self.family {
-                    Family::Inet | Family::Bridge | Family::Netdev => {
-                        Some(if v6 { "ip6" } else { "ip" }.to_owned())
-                    }
+                    Family::Inet | Family::Bridge | Family::Netdev => match t.family {
+                        2 => Some("ip".to_owned()),
+                        10 => Some("ip6".to_owned()),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 self.push(Stmt::Tproxy { family, addr, port });

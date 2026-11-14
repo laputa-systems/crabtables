@@ -445,6 +445,7 @@ impl Parser {
         if what.contains(" or ")
             || what.starts_with('\'')
             || what == "number"
+            || what == "colon"
             || what.starts_with("keyword ")
         {
             let what = what.strip_prefix("keyword ").unwrap_or(what);
@@ -2442,9 +2443,19 @@ impl Parser {
                 };
                 let (mut addr, mut port) = (None, None);
                 if self.eat_word("to") {
+                    let start = self.pos;
                     let (a, p) = self.addr_port(family.as_deref() == Some("ip6"))?;
-                    addr = a;
-                    port = p;
+                    if kind == NatKind::Masquerade && a.is_some() {
+                        self.pos = start;
+                        return self.unexpected("colon");
+                    }
+                    // `redirect to 80` names a port.
+                    if kind == NatKind::Redirect && p.is_none() {
+                        port = a;
+                    } else {
+                        addr = a;
+                        port = p;
+                    }
                 }
                 let mut flags = Vec::new();
                 while let Some(f) = self

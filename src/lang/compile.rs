@@ -118,6 +118,8 @@ fn key_len(c: &[Comp]) -> u32 {
 struct Ctx {
     l3: Option<u16>,
     l4: Option<u8>,
+    /// A transport protocol match is in effect, as nft tracks it.
+    transport: bool,
     ether: bool,
     vlan: bool,
 }
@@ -335,6 +337,23 @@ pub fn priority_value(family: Family, hook: &str, p: &Priority) -> Result<i32> {
 }
 
 /// Text of a raw value expression.
+/// Whether matching `left` for equality with `data` gives nft a transport
+/// protocol context: any `meta l4proto` value, and the protocol numbers
+/// that name a transport protocol for `ip protocol`, `ip6 nexthdr` and
+/// `ct protocol`.
+fn gives_transport(left: &Expr, data: &[u8]) -> bool {
+    let known = || data.first().is_some_and(|n| proto::transport(*n).is_some());
+    match left {
+        Expr::Meta(k) => k == "l4proto",
+        Expr::Payload { proto: p, field } => {
+            matches!((p.as_str(), field.as_str()), ("ip", "protocol") | ("ip6", "nexthdr"))
+                && known()
+        }
+        Expr::Ct { key, .. } => key == "protocol" && known(),
+        _ => false,
+    }
+}
+
 fn raw_text(e: &Expr) -> Option<&str> {
     match e {
         Expr::Value(Value::Raw(s)) => Some(s),
@@ -584,6 +603,7 @@ impl Compiler {
                     });
                     let last = errors.last_mut().unwrap();
                     last.needle = e.needle.clone();
+                    last.needle_last = e.needle_last;
                     last.related = e.related.clone();
                 }
                 errors.push(e);
@@ -2842,6 +2862,7 @@ impl RuleC<'_> {
             }
             Layer::Network(t) => self.dep_l3(t)?,
             Layer::Transport(Some(n)) => {
+                self.ctx.transport = true;
                 if self.ctx.l4 == Some(n) {
                     return Ok(());
                 }
@@ -2886,9 +2907,22 @@ impl RuleC<'_> {
         Ok(())
     }
 
+    /// Record what the matches of a set of values of `left` provide.
+    fn provides_set(&mut self, left: &Expr, comps: &[Comp], neg: bool, elems: &[Elem]) {
+        if neg || comps.len() != 1 {
+            return;
+        }
+        for k in elems.iter().filter_map(|e| e.key.as_ref()) {
+            if let Ok(KeyVal::Single(v)) = parse_keyval(&comps[0], k) {
+                self.ctx.transport |= gives_transport(left, &v);
+            }
+        }
+    }
+
     /// Record what an explicit match provides.
     fn provides(&mut self, left: &Expr, c: &Comp, data: &[u8]) {
         let b = |i: usize| data.get(i).copied().unwrap_or(0);
+        self.ctx.transport |= gives_transport(left, data);
         match left {
             Expr::Meta(k) if k == "nfproto" => match b(0) {
                 2 => self.ctx.l3 = Some(ethertype::IP),
@@ -3801,6 +3835,26 @@ impl RuleC<'_> {
                 Ok(())
             }
             Stmt::Tproxy { family, addr, port } => {
+                if !self.ctx.transport {
+                    return Err(Error::msg(
+                        "Transparent proxy support requires transport protocol match",
+                    ));
+                }
+                match (self.family, family.as_deref()) {
+                    (Family::Ipv4, Some("ip6")) | (Family::Ipv6, Some("ip")) => {
+                        return Err(Error::msg(format!(
+                            "conflicting protocols specified: {} vs. {}. You must specify ip or ip6 family in tproxy statement",
+                            if self.family == Family::Ipv4 { "ip" } else { "ip6" },
+                            family.as_deref().unwrap_or_default()
+                        )));
+                    }
+                    (Family::Inet | Family::Bridge | Family::Netdev, None) if addr.is_some() => {
+                        return Err(Error::msg(
+                            "specify `tproxy ip' or 'tproxy ip6' in inet table to disambiguate",
+                        ));
+                    }
+                    _ => {}
+                }
                 let fam = match (family.as_deref(), self.family) {
                     (Some(f), _) => nfproto(f),
                     (None, Family::Ipv6) => u32::from(NFPROTO_IPV6),
@@ -4065,6 +4119,7 @@ impl RuleC<'_> {
                         }
                     }
                 }
+                self.provides_set(left, &comps, neg, elems);
                 let (name, id, skey) = self.anon_set(left, &comps, None, elems)?;
                 self.adjust_key(reg, &mut comps, &skey)?;
                 self.push(kx::Lookup {
@@ -4203,6 +4258,7 @@ impl RuleC<'_> {
         op: RelOp,
         elems: &[Elem],
     ) -> Result<()> {
+        self.provides_set(left, comps, neg_op(op), elems);
         let (name, id, skey) = self.anon_set(left, comps, None, elems)?;
         self.adjust_key(Reg::R1, comps, &skey)?;
         self.push(kx::Lookup {
@@ -4560,8 +4616,10 @@ impl RuleC<'_> {
             && addr.is_some()
             && family.is_none()
         {
-            return Err(Error::msg(
-                "specify `dnat ip` or `dnat ip6` in inet table to disambiguate",
+            let w = if kind == NatKind::Snat { "snat" } else { "dnat" };
+            return Err(Error::about(
+                format!("specify `{w} ip' or '{w} ip6' in inet table to disambiguate"),
+                w,
             ));
         }
         let ac = Comp::of_type(
@@ -4616,15 +4674,28 @@ impl RuleC<'_> {
             }
         }
         if let Some(p) = port {
+            let parsed = match p {
+                Expr::Map(..) => None,
+                _ => Some(parse_keyval(&pc, p)?),
+            };
+            if !self.ctx.transport {
+                let mut e = Error::about(
+                    "transport protocol mapping is only valid after transport protocol match",
+                    super::print::expr(p, self.family, &super::print::Opts::default()),
+                );
+                e.needle_last = true;
+                e.related = Some(Related::Word);
+                return Err(e);
+            }
             // Port registers follow the address registers.
             let n = u32::from(amin.is_some()) + u32::from(amax.is_some());
             let (r1, r2) = (reg_at(n * 4), reg_at(n * 4 + 4));
-            match p {
-                Expr::Map(..) => {
+            match parsed {
+                None => {
                     self.load(p, n * 4, Some(&[pc]))?;
                     pmin = Some(r1);
                 }
-                _ => match parse_keyval(&pc, p)? {
+                Some(v) => match v {
                     KeyVal::Single(v) => {
                         self.push(kx::Immediate {
                             dreg: r1,
@@ -4653,7 +4724,13 @@ impl RuleC<'_> {
         let flags = (fl != 0).then_some(fl);
         match kind {
             NatKind::Snat | NatKind::Dnat => {
-                let fam = if v6 { NFPROTO_IPV6 } else { NFPROTO_IPV4 };
+                let fam = if v6 {
+                    NFPROTO_IPV6
+                } else if self.family == Family::Inet && family.is_none() && addr.is_none() {
+                    NFPROTO_INET
+                } else {
+                    NFPROTO_IPV4
+                };
                 self.push(kx::Nat {
                     ty: if kind == NatKind::Snat {
                         nft::NatType::Snat

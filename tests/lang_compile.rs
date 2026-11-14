@@ -414,3 +414,70 @@ fn single_value_ranges() {
 ",
     );
 }
+
+#[test]
+fn nat_port_with_transport_context() {
+    check(
+        "table ip t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    meta l4proto tcp dnat to 1.2.3.4:80
+    meta l4proto { tcp, udp } dnat to 1.2.3.4:80
+    meta l4proto { 98, 99 } dnat to 1.2.3.4:80
+    ip protocol tcp redirect to :80
+    ip protocol { tcp, 99 } redirect to :80
+    ip protocol 99 tcp dport 1 dnat to 1.2.3.4:80
+    ct protocol udp redirect to :80
+    icmp type echo-request dnat to 1.2.3.4:80
+    tcp dport vmap { 1 : accept } redirect to :80
+    tcp dport 1 redirect to 80
+    tcp dport 2 redirect to 80-90
+    meta l4proto 6 meta l4proto != 17 dnat to 10.80.1.1:80
+    dnat to 1.2.3.4
+    redirect
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    udp dport 1 masquerade to :80-90
+    meta l4proto tcp snat to 1.2.3.4:80
+  }
+}
+",
+    );
+}
+
+#[test]
+fn inet_port_only_nat_and_tproxy_family() {
+    check(
+        "table inet t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    tcp dport 1 dnat to :80
+    tcp dport 2 redirect to :80
+    tcp dport 3 dnat ip to 1.2.3.4:80
+  }
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    meta l4proto tcp tproxy to :80
+    tcp dport 1 tproxy to :80
+    udp dport 1 tproxy ip to :80
+    udp dport 2 tproxy ip6 to [fd00::5]:80
+  }
+}
+table ip t4 {
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    meta l4proto tcp tproxy to :80
+    meta l4proto tcp tproxy ip to 1.2.3.4
+  }
+}
+table ip6 t6 {
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    meta l4proto tcp tproxy to :80
+    meta l4proto tcp tproxy ip6 to [fd00::5]
+  }
+}
+",
+    );
+}

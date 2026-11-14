@@ -448,14 +448,13 @@ pub fn expr(e: &kx::Expr, dump: bool) -> String {
         E::Notrack(_) => "notrack".into(),
         E::FlowOffload(f) => format!("flow_offload flowtable {}", f.table_name),
         E::Tproxy(t) => {
-            let mut s = format!(
-                "tproxy {}",
-                match t.family {
-                    2 => "ip",
-                    10 => "ip6",
-                    _ => "inet",
-                }
-            );
+            let mut s = String::from("tproxy");
+            match t.family {
+                0 => {}
+                2 => s.push_str(" ip"),
+                10 => s.push_str(" ip6"),
+                _ => s.push_str(" inet"),
+            }
             if let Some(a) = t.reg_addr {
                 let _ = write!(s, " addr reg {}", reg(a));
             }

@@ -14,6 +14,8 @@ pub enum Related {
     To(Box<str>),
     /// The whole location of the error (before narrowing it to `needle`).
     Whole,
+    /// The first word of the error's location (`dnat` of `dnat to 1.2.3.4:80`).
+    Word,
 }
 
 /// Convenience alias.
@@ -31,6 +33,8 @@ pub struct Error {
     /// Text within the location that the error is about (e.g. a value):
     /// the location is narrowed to it when rendering.
     pub needle: Option<String>,
+    /// Narrow the location to the last occurrence of `needle`.
+    pub needle_last: bool,
     /// A related location (underlined with `~`).
     pub related: Option<Related>,
     /// Times nft reports this error (some errors it reports twice).
@@ -60,6 +64,7 @@ impl Error {
             span: None,
             source: None,
             needle: None,
+            needle_last: false,
             related: None,
             repeat: 1,
             origin: None,
@@ -135,6 +140,10 @@ impl Error {
             None => None,
             Some(Related::Span(r)) => Some(*r),
             Some(Related::Whole) => Some(whole),
+            Some(Related::Word) => input.get(whole.start..whole.end).map(|x| Span {
+                start: whole.start,
+                end: whole.start + x.find(char::is_whitespace).unwrap_or(x.len()),
+            }),
             Some(Related::To(t)) => input
                 .get(whole.start..whole.end)
                 .and_then(|x| x.find(&**t))
@@ -145,7 +154,13 @@ impl Error {
         };
         if let Some(n) = &self.needle {
             let end = span.end.min(input.len());
-            if let Some(i) = input.get(span.start..end).and_then(|t| t.find(n.as_str())) {
+            let text = input.get(span.start..end);
+            let at = if self.needle_last {
+                text.and_then(|t| t.rfind(n.as_str()))
+            } else {
+                text.and_then(|t| t.find(n.as_str()))
+            };
+            if let Some(i) = at {
                 span = Span {
                     start: span.start + i,
                     end: span.start + i + n.len(),
