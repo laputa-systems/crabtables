@@ -1,5 +1,15 @@
 Prefix: CRAB
-Next: 12
+Next: 13
+### CRAB-12 · P2 · The parser silently accepts or drops NAT and expression forms nft rejects
+
+- **Area:** Language parser and compiler
+- **Where:** `src/lang/parse.rs`, `src/lang/compile.rs`
+- **Problem:** Found while fixing CRAB-11, each checked against nft 1.1.3: `redirect to 1.2.3.4:80` silently drops the address (nft: syntax error); `dnat to ip saddr map { ... : 1.2.3.4 . 80 }` is accepted (nft rejects it); in `inet`, `tproxy to :80` after an `ip saddr` or `meta nfproto ipv4` match is accepted where nft reports conflicting protocols; `meta nfproto` in an `ip` table is accepted; the "Statement after terminal statement" check is missing; `tcp option mss`, `tcp dport 1 | 2`, `:tcp dport` as a NAT port and `meta l4proto { tcp - udp }` do not parse; `tproxy ip to [::1]:80` reports a different error. Silently dropping part of a statement installs a different policy than written.
+- **Recommendation:** Reject the silently-dropped and over-accepted forms with nft's diagnostics first (they change policy), then add the missing syntax; cover each in the `cli/tests/compat.rs` nft differential.
+- **Fix with:** reference-parity
+- **Effort:** M
+
+
 ### CRAB-7 · P2 · Qualify packet behavior and failed updates against nft before primary firewall use
 
 - **Area:** Firewall compatibility
