@@ -60,8 +60,9 @@ Separate tests exercise real traffic, NAT, conntrack, and rejected-batch rollbac
 The paired qualification suite (`cargo test -p nfcrt --all-features --test qualify`, as root)
 runs the same policies and traffic through `nft`, `nfcrt`, and the typed API in separate
 network-namespace topologies for IPv4 and IPv6, and writes an evidence summary to
-`.work/qualify-evidence.json`. It currently reports known divergences from `nft`, so no
-deployment profile is qualified; see the
+`.work/qualify-evidence.json`. It covers filtering, NAT, conntrack, updates and CLI boundaries; it
+currently reports known divergences from `nft` (the intentional ones are listed separately and do not
+block), so no deployment profile is qualified; see the
 [differential testing design](https://github.com/laputa-systems/crabtables/blob/main/docs/rfc/CRAB-7-nft-differential-qualification.md)
 for its scope, results, and what remains.
 See [open correctness findings](https://github.com/laputa-systems/crabtables/blob/main/TODO.md)

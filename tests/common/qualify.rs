@@ -20,6 +20,12 @@ pub const SILENCE_MS: u64 = 300;
 pub const FENCE_MS: u64 = 4000;
 pub const COMMAND_MS: u64 = 60_000;
 pub const CANARY_BUDGET: usize = 32;
+pub const BURST_CHUNK: usize = 16;
+pub const BURST_PAUSE_US: u64 = 500;
+pub const UPDATE_BUDGET: usize = 32;
+pub const UPDATE_MIN_ROUNDS: usize = 100;
+pub const UPDATE_PACE_US: u64 = 150;
+pub const MIN_JUSTIFICATION: usize = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fam {
@@ -220,6 +226,10 @@ pub enum Want {
         peer: Option<IpAddr>,
         port: PeerPort,
     },
+    Unanswered {
+        at: String,
+        peer: Option<IpAddr>,
+    },
 }
 
 impl Want {
@@ -228,6 +238,13 @@ impl Want {
             at: sink_name(proto, bind, port),
             peer: Some(peer),
             port: pp,
+        }
+    }
+
+    pub fn unanswered(proto: Proto, bind: Bind, port: u16, peer: IpAddr) -> Want {
+        Want::Unanswered {
+            at: sink_name(proto, bind, port),
+            peer: Some(peer),
         }
     }
 
@@ -294,6 +311,37 @@ pub struct Cli {
     pub reference_may_crash: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IcmpKind {
+    EchoRequest,
+    EchoReply,
+}
+
+#[derive(Clone, Debug)]
+pub struct Ping {
+    pub name: &'static str,
+    pub from: usize,
+    pub dst: Where,
+    pub kind: IcmpKind,
+    pub answered: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdateClass {
+    pub name: &'static str,
+    pub port: u16,
+    pub old: bool,
+    pub new: bool,
+}
+
+#[derive(Clone)]
+pub struct Update {
+    pub policy: Ruleset,
+    pub classes: Vec<UpdateClass>,
+    pub fence: String,
+    pub fence_port: u16,
+}
+
 #[derive(Clone)]
 pub struct Replace {
     pub policy: Ruleset,
@@ -327,7 +375,46 @@ pub enum Step {
     },
     Snap(SnapSpec),
     Replace(Replace),
+    Update(Update),
+    Ping(Ping),
     Same(&'static str, &'static str),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Marker {
+    None,
+    Known(&'static str),
+    Intentional(&'static str),
+}
+
+impl Marker {
+    pub fn known(self) -> Option<&'static str> {
+        match self {
+            Marker::Known(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn intentional(self) -> Option<&'static str> {
+        match self {
+            Marker::Intentional(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn text(self) -> Option<&'static str> {
+        match self {
+            Marker::None => None,
+            Marker::Known(s) | Marker::Intentional(s) => Some(s),
+        }
+    }
+
+    pub fn justified(self) -> bool {
+        match self {
+            Marker::Intentional(j) => j.trim().chars().count() >= MIN_JUSTIFICATION,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -337,7 +424,7 @@ pub struct Case {
     pub fam: Fam,
     pub sinks: Vec<SinkSpec>,
     pub steps: Vec<Step>,
-    pub known: Option<&'static str>,
+    pub marker: Marker,
     pub generated: Option<(u64, usize)>,
 }
 
@@ -352,7 +439,7 @@ impl Case {
                     }
                     any = true;
                 }
-                Step::Cli(_) | Step::Replace(_) => return false,
+                Step::Cli(_) | Step::Replace(_) | Step::Update(_) => return false,
                 _ => {}
             }
         }
@@ -382,6 +469,7 @@ pub enum Fault {
     DropNat,
     UnmaskConcat,
     SplitReplace,
+    DropCt,
 }
 
 impl Fault {
@@ -390,6 +478,7 @@ impl Fault {
             "drop-nat" => Some(Fault::DropNat),
             "unmask-concat" => Some(Fault::UnmaskConcat),
             "split-replace" => Some(Fault::SplitReplace),
+            "drop-ct" => Some(Fault::DropCt),
             _ => None,
         }
     }
@@ -408,6 +497,11 @@ impl Fault {
                 .join("\n"),
             Fault::UnmaskConcat => text.replace(" and 255", ""),
             Fault::SplitReplace => text.to_string(),
+            Fault::DropCt => text
+                .lines()
+                .filter(|l| !(l.contains("ct mark set") || l.contains("ct zone set") || l.contains("notrack")))
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 }
@@ -892,6 +986,17 @@ pub fn start_sinks(w: &World, specs: &[SinkSpec]) -> Result<Sinks, String> {
                     Proto::Udp => {
                         let u = UdpSocket::bind(a).map_err(|e| format!("bind {} {a}: {e}", s.name))?;
                         u.set_nonblocking(true).map_err(|e| e.to_string())?;
+                        let big: libc::c_int = 4 << 20;
+                        // SAFETY: setsockopt with a pointer to a c_int of the stated length.
+                        unsafe {
+                            libc::setsockopt(
+                                u.as_raw_fd(),
+                                libc::SOL_SOCKET,
+                                libc::SO_RCVBUFFORCE,
+                                (&raw const big).cast(),
+                                4,
+                            );
+                        }
                         Endpoint::Udp(u)
                     }
                 };
@@ -1097,10 +1202,29 @@ fn echo_roundtrip(s: &mut TcpStream, payload: &[u8], ms: u64) -> Outcome {
     }
 }
 
+fn udp_bind_reuse(src: SocketAddr) -> Result<UdpSocket, String> {
+    let dom = if src.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
+    // SAFETY: plain socket calls on a descriptor owned here with valid sockaddr pointers.
+    unsafe {
+        let fd = libc::socket(dom, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            return Err(format!("socket: {}", std::io::Error::last_os_error()));
+        }
+        let owned = OwnedFd::from_raw_fd(fd);
+        let one: libc::c_int = 1;
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, (&raw const one).cast(), 4);
+        let (s, sl) = sockaddr(src);
+        if libc::bind(fd, (&raw const s).cast(), sl) != 0 {
+            return Err(format!("bind {src}: {}", std::io::Error::last_os_error()));
+        }
+        Ok(UdpSocket::from(owned))
+    }
+}
+
 fn udp_roundtrip(src: SocketAddr, dst: SocketAddr, mark: u32, payload: &[u8], ms: u64) -> Outcome {
-    let u = match UdpSocket::bind(src) {
+    let u = match udp_bind_reuse(src) {
         Ok(u) => u,
-        Err(e) => return Outcome::Error(format!("bind {src}: {e}")),
+        Err(e) => return Outcome::Error(e),
     };
     if let Err(e) = set_mark(u.as_raw_fd(), mark) {
         return Outcome::Error(e);
@@ -1226,6 +1350,8 @@ impl Run<'_> {
             }
             Step::Snap(s) => self.snap(s)?,
             Step::Replace(r) => self.replace(r)?,
+            Step::Update(u) => self.update(u)?,
+            Step::Ping(p) => self.ping(p)?,
             Step::Same(a, b) => {
                 let (x, y) = (self.snaps.get(a).cloned(), self.snaps.get(b).cloned());
                 if x != y || x.is_none() {
@@ -1352,6 +1478,11 @@ impl Run<'_> {
                     PeerPort::Range(lo, hi) => (*lo..=*hi).contains(&seen[0].peer.port()),
                 })
             .then_some(()),
+            Want::Unanswered { at, peer } => (o == Outcome::Blocked
+                && seen.len() == 1
+                && &seen[0].sink == at
+                && peer.is_none_or(|a| a == seen[0].peer.ip()))
+            .then_some(()),
         };
         self.expect(verdict.is_some(), || {
             format!("probe {}: want {:?}, observed\n{raw}", p.name, p.want)
@@ -1388,6 +1519,9 @@ impl Run<'_> {
                     Origin::Router => fam.unspecified(),
                 };
                 send(srcip, d.sport, d.dport, d.mark, id as u32)?;
+                if id % BURST_CHUNK == BURST_CHUNK - 1 {
+                    std::thread::sleep(Duration::from_micros(BURST_PAUSE_US));
+                }
             }
             let srcip = match from {
                 Origin::Client(i) => fam.client(i),
@@ -1510,6 +1644,41 @@ impl Run<'_> {
         Ok(())
     }
 
+    fn collect_fence(&mut self, fence: &str) -> (Vec<Seen>, bool) {
+        let deadline = Instant::now() + Duration::from_millis(FENCE_MS);
+        let mut seen: Vec<Seen> = Vec::new();
+        let mut fenced = false;
+        while !fenced {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.sinks.rx.recv_timeout(left) {
+                Ok(s) => {
+                    fenced = s.sink == fence;
+                    seen.push(s);
+                }
+                Err(_) => break,
+            }
+        }
+        seen.extend(self.drain());
+        (seen, fenced)
+    }
+
+    fn apply_watched(&mut self, p: &Ruleset, progress: &AtomicU64) -> (bool, String) {
+        let split = self.fault == Some(Fault::SplitReplace) && self.w.front == Front::Nfcrt;
+        if !split {
+            return self.apply_policy(p);
+        }
+        let flush = Ruleset {
+            label: "flush",
+            text: "flush ruleset\n".into(),
+            typed: None,
+            ok: true,
+        };
+        let a = self.apply_policy(&flush);
+        wait_count(progress, progress.load(Ordering::Relaxed) + 200);
+        let b = self.apply_policy(p);
+        (a.0 && b.0, b.1)
+    }
+
     fn replace(&mut self, r: &Replace) -> Result<(), String> {
         if self.w.front == Front::Typed {
             return Err("replace step in a typed world".into());
@@ -1526,16 +1695,7 @@ impl Run<'_> {
         let sender = {
             let (sent, stop) = (sent.clone(), stop.clone());
             std::thread::spawn(move || {
-                let joined = std::fs::File::open(&client_ns)
-                    .map_err(|e| format!("open {client_ns}: {e}"))
-                    .and_then(|f| {
-                        // SAFETY: setns on the calling thread with a namespace descriptor owned here.
-                        if unsafe { libc::setns(f.as_raw_fd(), libc::CLONE_NEWNET) } == 0 {
-                            Ok(())
-                        } else {
-                            Err(format!("setns: {}", std::io::Error::last_os_error()))
-                        }
-                    });
+                let joined = join_ns(&client_ns);
                 let failed = joined.is_err();
                 let _ = ready_tx.send(joined);
                 if failed {
@@ -1557,54 +1717,16 @@ impl Run<'_> {
             let _ = sender.join();
             return Err(e);
         }
-        let wait_for = |n: u64| -> bool {
-            let end = Instant::now() + Duration::from_millis(DELIVER_MS);
-            while sent.load(Ordering::Relaxed) < n {
-                if Instant::now() > end {
-                    return false;
-                }
-                std::thread::yield_now();
-            }
-            true
-        };
-        let ready = wait_for(200);
+        let ready = wait_count(&sent, 200);
         let before = sent.load(Ordering::Relaxed);
         let pre: Vec<Seen> = self.drain();
         let pre_leak = pre.len();
-        let split = self.fault == Some(Fault::SplitReplace) && self.w.front == Front::Nfcrt;
-        let (ok, raw) = if split {
-            let flush = Ruleset {
-                label: "flush",
-                text: "flush ruleset\n".into(),
-                typed: None,
-                ok: true,
-            };
-            let a = self.apply_policy(&flush);
-            let mid = sent.load(Ordering::Relaxed);
-            wait_for(mid + 200);
-            let b = self.apply_policy(&r.policy);
-            (a.0 && b.0, b.1)
-        } else {
-            self.apply_policy(&r.policy)
-        };
+        let (ok, raw) = self.apply_watched(&r.policy, &sent);
         let after = sent.load(Ordering::Relaxed);
-        let overlapped = wait_for(after + 200);
+        let overlapped = wait_count(&sent, after + 200);
         stop.store(true, Ordering::Relaxed);
         sender.join().unwrap();
-        let deadline = Instant::now() + Duration::from_millis(FENCE_MS);
-        let mut seen: Vec<Seen> = Vec::new();
-        let mut fenced = false;
-        while !fenced {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.sinks.rx.recv_timeout(left) {
-                Ok(s) => {
-                    fenced = s.sink == r.fence;
-                    seen.push(s);
-                }
-                Err(_) => break,
-            }
-        }
-        seen.extend(self.drain());
+        let (seen, fenced) = self.collect_fence(&r.fence);
         let leaked = seen.iter().filter(|s| s.sink == r.canary).count();
         let leaked = leaked + pre_leak;
         self.expect(ready && overlapped && after > before, || {
@@ -1627,6 +1749,253 @@ impl Run<'_> {
             format!("{raw}\ncanary sent before={before} after={after} delivered={leaked} (before replacement: {pre_leak})"),
         );
         Ok(())
+    }
+
+    fn update(&mut self, u: &Update) -> Result<(), String> {
+        if self.w.front == Front::Typed {
+            return Err("update step in a typed world".into());
+        }
+        let fam = self.w.fam;
+        let rounds = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let src_ip = fam.client(0);
+        let dst_ip = fam.server(0);
+        let ports: Vec<u16> = u.classes.iter().map(|c| c.port).collect();
+        let (fence_port, fence_src) = (u.fence_port, SocketAddr::new(src_ip, 38_001));
+        let client_ns = format!("/proc/self/task/{}/ns/net", self.w.client.tid);
+        let (ready_tx, ready_rx) = channel::<Result<(), String>>();
+        let sender = {
+            let (rounds, stop) = (rounds.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let setup = join_ns(&client_ns).and_then(|_| {
+                    ports
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            UdpSocket::bind(SocketAddr::new(src_ip, 30_000 + i as u16))
+                                .map_err(|e| format!("bind class socket {i}: {e}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                });
+                let socks = match setup {
+                    Ok(s) => {
+                        let _ = ready_tx.send(Ok(()));
+                        s
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                pin_cpu();
+                let mut r: u32 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    for (i, s) in socks.iter().enumerate() {
+                        let mut payload = [0u8; 5];
+                        payload[0] = i as u8;
+                        payload[1..].copy_from_slice(&r.to_be_bytes());
+                        let _ = s.send_to(&payload, SocketAddr::new(dst_ip, ports[i]));
+                    }
+                    r += 1;
+                    rounds.store(r as u64, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_micros(UPDATE_PACE_US));
+                }
+                if let Ok(f) = UdpSocket::bind(fence_src) {
+                    let _ = f.send_to(b"fence", SocketAddr::new(dst_ip, fence_port));
+                }
+            })
+        };
+        if let Err(e) = ready_rx.recv().unwrap_or_else(|e| Err(e.to_string())) {
+            let _ = sender.join();
+            return Err(e);
+        }
+        let ready = wait_count(&rounds, 2 * UPDATE_MIN_ROUNDS as u64);
+        let before = rounds.load(Ordering::Relaxed);
+        let (ok, raw) = self.apply_watched(&u.policy, &rounds);
+        let after = rounds.load(Ordering::Relaxed);
+        let overlapped = wait_count(&rounds, after + 2 * UPDATE_MIN_ROUNDS as u64);
+        stop.store(true, Ordering::Relaxed);
+        sender.join().unwrap();
+        let total = rounds.load(Ordering::Relaxed) as usize;
+        let (seen, fenced) = self.collect_fence(&u.fence);
+        let mut got: Vec<Vec<bool>> = vec![vec![false; total]; u.classes.len()];
+        for s in &seen {
+            if s.payload.len() != 5 {
+                continue;
+            }
+            let (c, r) = (s.payload[0] as usize, u32::from_be_bytes(s.payload[1..5].try_into().unwrap()) as usize);
+            if c < got.len() && r < total && s.sink == sink_name(Proto::Udp, Bind::Srv(0), u.classes[c].port) {
+                got[c][r] = true;
+            }
+        }
+        let (mut old_rounds, mut new_rounds, mut bad, mut reversions) = (0usize, 0usize, 0usize, 0usize);
+        let mut switched = false;
+        for r in 0..total {
+            let is_old = u.classes.iter().enumerate().all(|(c, k)| got[c][r] == k.old);
+            let is_new = u.classes.iter().enumerate().all(|(c, k)| got[c][r] == k.new);
+            match (is_old, is_new) {
+                (true, false) => {
+                    old_rounds += 1;
+                    if switched {
+                        reversions += 1;
+                    }
+                }
+                (false, true) => {
+                    new_rounds += 1;
+                    switched = true;
+                }
+                _ => bad += 1,
+            }
+        }
+        let violations = bad + reversions;
+        let consistent = violations <= UPDATE_BUDGET;
+        let covered = old_rounds >= UPDATE_MIN_ROUNDS && new_rounds >= UPDATE_MIN_ROUNDS;
+        self.expect(ready && overlapped && after > before, || {
+            format!(
+                "update {}: probe sender not running across the update (ready={ready}, before={before}, after={after})",
+                u.policy.label
+            )
+        });
+        self.expect(fenced, || "update: fence was never delivered".into());
+        self.expect(ok, || format!("update {}: {raw}", u.policy.label));
+        self.expect(consistent, || {
+            format!(
+                "update {}: {bad} rounds matched neither the complete old nor the complete new policy and {reversions} reverted to the old one (budget {UPDATE_BUDGET}) of {total} rounds",
+                u.policy.label
+            )
+        });
+        self.expect(covered, || {
+            format!(
+                "update {}: only {old_rounds} old-policy and {new_rounds} new-policy rounds observed (need {UPDATE_MIN_ROUNDS} each)",
+                u.policy.label
+            )
+        });
+        self.push(
+            format!("update {}", u.policy.label),
+            format!("installed={ok} consistent={consistent} both-policies-observed={covered}"),
+            format!("{raw}\nrounds={total} old={old_rounds} new={new_rounds} neither={bad} reverted={reversions} sent before={before} after={after}"),
+        );
+        Ok(())
+    }
+
+    fn ping(&mut self, p: &Ping) -> Result<(), String> {
+        let fam = self.w.fam;
+        let (src, dst) = (fam.client(p.from), p.dst.addr(fam));
+        let (kind, answered) = (p.kind, p.answered);
+        let ms = if answered { DELIVER_MS } else { SILENCE_MS };
+        let ident = 0x7c00u16 + p.name.len() as u16;
+        let res = self.w.client.run(move || icmp_exchange(src, dst, kind, ident, ms));
+        let seen = self.drain();
+        let name = match (&res, kind) {
+            (Ok(true), _) => "reply",
+            (Ok(false), IcmpKind::EchoRequest) => "silent",
+            (Ok(false), IcmpKind::EchoReply) => "sent",
+            (Err(_), _) => "error",
+        };
+        self.expect(
+            res.is_ok() && seen.is_empty() && (kind == IcmpKind::EchoReply || (res == Ok(true)) == answered),
+            || format!("ping {}: want answered={answered}, observed {name} {res:?}", p.name),
+        );
+        self.push(format!("ping {}", p.name), name.to_string(), format!("{name} {res:?}"));
+        Ok(())
+    }
+}
+
+fn wait_count(c: &AtomicU64, n: u64) -> bool {
+    let end = Instant::now() + Duration::from_millis(DELIVER_MS);
+    while c.load(Ordering::Relaxed) < n {
+        if Instant::now() > end {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+fn join_ns(path: &str) -> Result<(), String> {
+    std::fs::File::open(path)
+        .map_err(|e| format!("open {path}: {e}"))
+        .and_then(|f| {
+            // SAFETY: setns on the calling thread with a namespace descriptor owned here.
+            if unsafe { libc::setns(f.as_raw_fd(), libc::CLONE_NEWNET) } == 0 {
+                Ok(())
+            } else {
+                Err(format!("setns: {}", std::io::Error::last_os_error()))
+            }
+        })
+}
+
+fn icmp_checksum(b: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for c in b.chunks(2) {
+        sum += u32::from(u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn icmp_exchange(src: IpAddr, dst: IpAddr, kind: IcmpKind, ident: u16, ms: u64) -> Result<bool, String> {
+    let v6 = dst.is_ipv6();
+    let (dom, proto) = if v6 {
+        (libc::AF_INET6, libc::IPPROTO_ICMPV6)
+    } else {
+        (libc::AF_INET, libc::IPPROTO_ICMP)
+    };
+    // SAFETY: socket returns a descriptor that is wrapped immediately.
+    let fd = unsafe { libc::socket(dom, libc::SOCK_RAW | libc::SOCK_CLOEXEC, proto) };
+    if fd < 0 {
+        return Err(format!("raw socket: {}", std::io::Error::last_os_error()));
+    }
+    // SAFETY: fd was just created and is owned here.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    let (sa, sl) = sockaddr(SocketAddr::new(src, 0));
+    // SAFETY: bind with a valid sockaddr of the stated length.
+    if unsafe { libc::bind(fd, (&raw const sa).cast(), sl) } != 0 {
+        return Err(format!("bind {src}: {}", std::io::Error::last_os_error()));
+    }
+    let (ty, reply_ty) = match (v6, kind) {
+        (false, IcmpKind::EchoRequest) => (8u8, 0u8),
+        (false, IcmpKind::EchoReply) => (0, 0),
+        (true, IcmpKind::EchoRequest) => (128, 129),
+        (true, IcmpKind::EchoReply) => (129, 129),
+    };
+    let mut pkt = vec![ty, 0, 0, 0];
+    pkt.extend_from_slice(&ident.to_be_bytes());
+    pkt.extend_from_slice(&1u16.to_be_bytes());
+    pkt.extend_from_slice(b"crab7-icmp-probe");
+    if !v6 {
+        let c = icmp_checksum(&pkt);
+        pkt[2..4].copy_from_slice(&c.to_be_bytes());
+    }
+    let (da, dl) = sockaddr(SocketAddr::new(dst, 0));
+    // SAFETY: sendto with a valid buffer and sockaddr.
+    let n = unsafe { libc::sendto(fd, pkt.as_ptr().cast(), pkt.len(), 0, (&raw const da).cast(), dl) };
+    if n < 0 {
+        return Err(format!("sendto {dst}: {}", std::io::Error::last_os_error()));
+    }
+    if kind == IcmpKind::EchoReply {
+        return Ok(false);
+    }
+    let end = Instant::now() + Duration::from_millis(ms);
+    loop {
+        let left = end.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let mut p = [pollfd(owned.as_raw_fd())];
+        if poll1(&mut p, left) <= 0 {
+            return Ok(false);
+        }
+        let mut buf = [0u8; 2048];
+        // SAFETY: recv into a local buffer of the stated length.
+        let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
+        if n < 8 {
+            continue;
+        }
+        let b = &buf[..n as usize];
+        let icmp = if v6 { b } else { &b[((b[0] & 0xf) * 4) as usize..] };
+        if icmp.len() >= 8 && icmp[0] == reply_ty && u16::from_be_bytes([icmp[4], icmp[5]]) == ident {
+            return Ok(true);
+        }
     }
 }
 
@@ -1667,6 +2036,7 @@ pub enum Status {
     Passed,
     Failed,
     KnownDivergence,
+    Intentional,
     Skipped,
 }
 
@@ -1676,8 +2046,13 @@ impl Status {
             Status::Passed => "passed",
             Status::Failed => "failed",
             Status::KnownDivergence => "known_divergence",
+            Status::Intentional => "intentional",
             Status::Skipped => "skipped",
         }
+    }
+
+    pub fn satisfies_row(self) -> bool {
+        matches!(self, Status::Passed | Status::Intentional)
     }
 }
 
@@ -1690,7 +2065,7 @@ pub struct CaseResult {
     pub fronts: Vec<&'static str>,
     pub reference: Vec<(String, String)>,
     pub ms: u128,
-    pub known: Option<&'static str>,
+    pub marker: Marker,
     pub generated: Option<(u64, usize)>,
     pub notes: Vec<String>,
 }
@@ -1705,7 +2080,7 @@ pub fn skipped(case: &Case, why: &str) -> CaseResult {
         fronts: Vec::new(),
         reference: Vec::new(),
         ms: 0,
-        known: case.known,
+        marker: case.marker,
         generated: case.generated,
         notes: Vec::new(),
     }
@@ -1780,19 +2155,30 @@ pub fn run_case(case: &Case, fault: Option<Fault>, tag: &str) -> CaseResult {
     let status = if failed {
         detail.extend(divergences);
         Status::Failed
+    } else if !case.marker.justified() {
+        detail.push(format!(
+            "intentional difference without a written justification of at least {MIN_JUSTIFICATION} characters"
+        ));
+        detail.extend(divergences);
+        Status::Failed
     } else if divergences.is_empty() {
-        if case.known.is_some() {
-            detail.push("marked as a known divergence but it no longer reproduces: remove the marker".into());
-            Status::Failed
-        } else {
-            Status::Passed
+        match case.marker {
+            Marker::None => Status::Passed,
+            Marker::Known(_) => {
+                detail.push("marked as a known divergence but it no longer reproduces: remove the marker".into());
+                Status::Failed
+            }
+            Marker::Intentional(_) => {
+                detail.push("marked as an intentional difference but it no longer differs: remove the marker".into());
+                Status::Failed
+            }
         }
     } else {
         detail.extend(divergences);
-        if case.known.is_some() {
-            Status::KnownDivergence
-        } else {
-            Status::Failed
+        match case.marker {
+            Marker::None => Status::Failed,
+            Marker::Known(_) => Status::KnownDivergence,
+            Marker::Intentional(_) => Status::Intentional,
         }
     };
     CaseResult {
@@ -1804,7 +2190,7 @@ pub fn run_case(case: &Case, fault: Option<Fault>, tag: &str) -> CaseResult {
         fronts: fronts.iter().map(|f| f.name()).collect(),
         reference,
         ms: t0.elapsed().as_millis(),
-        known: case.known,
+        marker: case.marker,
         generated: case.generated,
         notes: runs.iter().flat_map(|r| r.notes.clone()).collect(),
     }
@@ -1925,7 +2311,7 @@ pub fn profile_json() -> String {
         fams = list(&["ip", "ip6", "inet"]),
         hooks = list(&["prerouting", "input", "forward", "output", "postrouting"]),
         topo = json_str("client - router(c0,s0) - server over veth, dual stack, netns per role, two worlds per scenario"),
-        excl = list(&["bridge", "netdev", "flowtable offload", "NFQUEUE", "conntrack zones", "RELATED/INVALID stimuli"]),
+        excl = list(&["bridge", "netdev", "flowtable offload", "NFQUEUE"]),
     )
 }
 
@@ -1945,14 +2331,14 @@ pub fn evidence_json(
         if rows.is_empty() {
             missing.push(format!("{row}/{}: no case", fam.tag()));
         } else {
-            for bad in rows.iter().filter(|r| r.status != Status::Passed) {
+            for bad in rows.iter().filter(|r| !r.status.satisfies_row()) {
                 missing.push(format!("{row}/{}: {} is {}", fam.tag(), bad.id, bad.status.name()));
             }
         }
     }
     let qualified = complete && missing.is_empty();
     let mut s = String::new();
-    let _ = write!(s, "{{\"schema\":1,\"suite\":\"CRAB-7\",\"profile\":{},", profile_json());
+    let _ = write!(s, "{{\"schema\":2,\"suite\":\"CRAB-7\",\"profile\":{},", profile_json());
     let _ = write!(
         s,
         "\"seeds\":{{{}}},",
@@ -1962,16 +2348,55 @@ pub fn evidence_json(
             .collect::<Vec<_>>()
             .join(",")
     );
+    let generated: Vec<&CaseResult> = results.iter().filter(|r| r.generated.is_some()).collect();
+    let total: usize = generated.iter().filter_map(|r| r.generated.map(|g| g.1)).sum();
     let _ = write!(
         s,
-        "\"summary\":{{\"inventory\":{},\"executed\":{},\"passed\":{},\"failed\":{},\"known_divergence\":{},\"skipped\":{},\"complete\":{complete},\"qualified\":{qualified},\"unmet_required_rows\":[{}]}},",
+        "\"generated_budget\":{{\"total\":{total},\"cases\":[{}]}},",
+        generated
+            .iter()
+            .map(|r| {
+                let (seed, n) = r.generated.unwrap();
+                format!("{{\"id\":{},\"seed\":{seed},\"count\":{n}}}", json_str(&r.id))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let _ = write!(
+        s,
+        "\"summary\":{{\"inventory\":{},\"executed\":{},\"passed\":{},\"failed\":{},\"known_divergence\":{},\"intentional\":{},\"skipped\":{},\"complete\":{complete},\"qualified\":{qualified},\"unmet_required_rows\":[{}]}},",
         results.len(),
         results.len() - count(Status::Skipped),
         count(Status::Passed),
         count(Status::Failed),
         count(Status::KnownDivergence),
+        count(Status::Intentional),
         count(Status::Skipped),
         missing.iter().map(|m| json_str(m)).collect::<Vec<_>>().join(",")
+    );
+    let listed = |status: Status| {
+        results
+            .iter()
+            .filter(|r| r.status == status)
+            .map(|r| {
+                format!(
+                    "{{\"id\":{},\"row\":{},\"family\":{},\"{}\":{},\"difference\":{}}}",
+                    json_str(&r.id),
+                    json_str(r.row),
+                    json_str(r.fam.tag()),
+                    if status == Status::Intentional { "justification" } else { "note" },
+                    r.marker.text().map(json_str).unwrap_or_else(|| "null".into()),
+                    json_str(&r.detail.join("\n"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let _ = write!(
+        s,
+        "\"intentional_differences\":[{}],\"known_divergences\":[{}],",
+        listed(Status::Intentional),
+        listed(Status::KnownDivergence)
     );
     s.push_str("\"cases\":[");
     for (i, r) in results.iter().enumerate() {
@@ -1991,13 +2416,14 @@ pub fn evidence_json(
             .unwrap_or_else(|| "null".into());
         let _ = write!(
             s,
-            "{{\"id\":{},\"row\":{},\"family\":{},\"frontends\":[{}],\"status\":{},\"known_divergence\":{},\"generated\":{generated},\"elapsed_ms\":{},\"detail\":{},\"notes\":[{notes}],\"reference_observations\":[{obs}]}}",
+            "{{\"id\":{},\"row\":{},\"family\":{},\"frontends\":[{}],\"status\":{},\"known_divergence\":{},\"intentional\":{},\"generated\":{generated},\"elapsed_ms\":{},\"detail\":{},\"notes\":[{notes}],\"reference_observations\":[{obs}]}}",
             json_str(&r.id),
             json_str(r.row),
             json_str(r.fam.tag()),
             r.fronts.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
             json_str(r.status.name()),
-            r.known.map(json_str).unwrap_or_else(|| "null".into()),
+            r.marker.known().map(json_str).unwrap_or_else(|| "null".into()),
+            r.marker.intentional().map(json_str).unwrap_or_else(|| "null".into()),
             r.ms,
             json_str(&r.detail.join("\n"))
         );
