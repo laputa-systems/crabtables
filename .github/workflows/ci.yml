@@ -10,7 +10,7 @@ env:
 jobs:
   lint:
     name: Lint, docs and unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -29,7 +29,7 @@ jobs:
     # nftables 1.1.x; the kernel (and its modules, loaded on demand) is the
     # runner's. Tests of features newer than the running kernel are skipped.
     name: Integration tests (kernel)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: rust:1-trixie
       options: --privileged
