@@ -2132,7 +2132,7 @@ impl Parser {
         let start = self.span().start;
         let mut r = Rule::default();
         let mut spans = Vec::new();
-        let mut terminal: Option<Span> = None;
+        let mut locs = Vec::new();
         while !self.at_end() {
             // Command keywords start no statement.
             const NOT_STMTS: &[&str] = &[
@@ -2200,26 +2200,23 @@ impl Parser {
                 start: s,
                 end: self.prev_end(),
             };
-            // Nothing can follow a verdict.
-            if let Some(t) = terminal {
-                let mut e = Error::at("Statement after terminal statement has no effect", sp);
-                e.related = Some(super::error::Related::Span(t));
-                return Err(e);
-            }
-            if matches!(&st, Stmt::Verdict(v) if !matches!(v, Verdict::Continue))
-                || matches!(st, Stmt::Reject { .. })
-            {
-                terminal = Some(Span {
-                    start: self.toks[start_tok].span.start,
-                    end: sp.end,
-                });
-            }
+            locs.push(
+                if matches!(st, Stmt::Reject { .. } | Stmt::Queue { .. } | Stmt::Nat { .. }) {
+                    self.toks[start_tok].span
+                } else {
+                    Span {
+                        start: self.toks[start_tok].span.start,
+                        end: sp.end,
+                    }
+                },
+            );
             spans.push(sp);
             r.stmts.push(st);
         }
         let end = self.prev_end().max(start);
         r.span = Span { start, end };
         r.stmt_spans = spans.clone();
+        r.stmt_locs = locs;
         // A `}` closes the enclosing block; leave it.
         if matches!(self.peek(), Some(Tok::Newline) | Some(Tok::Punct(";"))) {
             self.pos += 1;
@@ -2448,6 +2445,9 @@ impl Parser {
                     if kind == NatKind::Masquerade && a.is_some() {
                         self.pos = start;
                         return self.unexpected("colon");
+                    }
+                    if kind == NatKind::Redirect && a.is_some() && p.is_some() {
+                        return Err(self.redirect_address(start));
                     }
                     // `redirect to 80` names a port.
                     if kind == NatKind::Redirect && p.is_none() {
@@ -2694,14 +2694,90 @@ impl Parser {
         }
     }
 
+    /// nft's error for `redirect to addr:port`, which takes a port only:
+    /// the colon after the address is unexpected.
+    fn redirect_address(&self, start: usize) -> Error {
+        let sp = self.toks[start].span;
+        let Some(Tok::Word(w)) = self.toks.get(start).map(|t| &t.tok) else {
+            return Error::at(
+                "syntax error, unexpected colon, expecting end of file or newline or semicolon",
+                self.toks[self.pos - 1].span,
+            );
+        };
+        let colon = if w.starts_with('[') {
+            w.find("]:").map(|i| i + 1)
+        } else {
+            w.find(':')
+        }
+        .unwrap_or(0);
+        if w[..colon].chars().all(|c| c.is_ascii_digit()) {
+            return Error::at(
+                "Could not resolve service: Servname not supported for ai_socktype",
+                sp,
+            );
+        }
+        Error::at(
+            "syntax error, unexpected colon, expecting end of file or newline or semicolon",
+            Span {
+                start: sp.start + colon,
+                end: sp.start + colon + 1,
+            },
+        )
+    }
+
     /// `addr[:port]`, `:port`, `[v6addr]:port`, `addr map {...}`, ...
+    /// Split a `addr:` or `:` joined to the start of a header field port
+    /// expression (`1.2.3.4:tcp dport`) into tokens of their own.
+    fn split_port_expr(&mut self) {
+        let Some(Tok::Word(w)) = self.peek().cloned() else {
+            return;
+        };
+        if w.starts_with('[') || w.matches(':').count() != 1 {
+            return;
+        }
+        let Some((head, tail)) = w.split_once(':') else {
+            return;
+        };
+        if tail.is_empty() || !Self::expression_start(tail, self.peek_word_at(1)) {
+            return;
+        }
+        let sp = self.span();
+        let colon = sp.start + head.len();
+        let mut parts = Vec::new();
+        if !head.is_empty() {
+            parts.push(Token {
+                tok: Tok::Word(head.to_owned()),
+                span: Span {
+                    start: sp.start,
+                    end: colon,
+                },
+            });
+        }
+        parts.push(Token {
+            tok: Tok::Punct(":"),
+            span: Span {
+                start: colon,
+                end: colon + 1,
+            },
+        });
+        parts.push(Token {
+            tok: Tok::Word(tail.to_owned()),
+            span: Span {
+                start: colon + 1,
+                end: sp.end,
+            },
+        });
+        self.toks.splice(self.pos..=self.pos, parts);
+    }
+
     fn addr_port(&mut self, v6: bool) -> Result<(Option<Expr>, Option<Expr>)> {
+        self.split_port_expr();
         // `to :1000-2000`
         if self.eat_punct(":") {
             return Ok((None, Some(self.expr()?)));
         }
         if let Some(w) = self.peek_word().map(str::to_owned) {
-            if let Some(p) = w.strip_prefix(':') {
+            if let Some(p) = w.strip_prefix(':').filter(|p| !p.contains(':')) {
                 self.pos += 1;
                 return Ok((None, Some(Expr::raw(p))));
             }
@@ -2709,15 +2785,15 @@ impl Parser {
             if let Some(rest) = w.strip_prefix('[') {
                 if let Some((a, p)) = rest.split_once("]:") {
                     self.pos += 1;
-                    return Ok((Some(Expr::raw(a)), Some(Expr::raw(p))));
+                    return Ok((Some(Expr::raw(format!("[{a}]"))), Some(Expr::raw(p))));
                 }
-                if let Some(a) = rest.strip_suffix(']') {
+                if rest.ends_with(']') {
                     self.pos += 1;
-                    return Ok((Some(Expr::raw(a)), None));
+                    return Ok((Some(Expr::raw(w.clone())), None));
                 }
             }
             let colons = w.matches(':').count();
-            if !v6 && colons == 1 && !w.contains("::") {
+            if colons == 1 && !w.contains("::") && (!v6 || w.contains('.')) {
                 let (a, p) = w.split_once(':').unwrap();
                 self.pos += 1;
                 let a = if a.is_empty() {
@@ -2992,6 +3068,11 @@ impl Parser {
                     return self.primary();
                 }
                 let w = self.word("value")?;
+                if self.is_punct("-") && matches!(self.peek_at(1), Some(Tok::Word(_))) {
+                    self.pos += 1;
+                    let b = self.word("value")?;
+                    return Ok(Expr::Range(Box::new(Expr::raw(w)), Box::new(Expr::raw(b))));
+                }
                 Ok(Expr::raw(w))
             }
             Some(Tok::Punct("-")) => {
@@ -3007,7 +3088,12 @@ impl Parser {
         let Some(w) = self.peek_word() else {
             return false;
         };
-        let next = self.peek_word_at(1);
+        Self::expression_start(w, self.peek_word_at(1))
+    }
+
+    /// Whether the word `w`, followed by the word `next`, starts an
+    /// expression.
+    fn expression_start(w: &str, next: Option<&str>) -> bool {
         match w {
             "meta" | "ct" | "numgen" | "jhash" | "symhash" | "fib" | "rt" | "socket" | "osf"
             | "ipsec" | "exthdr" => true,
@@ -3238,6 +3324,10 @@ impl Parser {
     fn option_expr(&mut self, kind: &str) -> Result<Expr> {
         self.pos += 1; // `option` / `chunk`
         let name = self.word("option name")?;
+        let name = match name.as_str() {
+            "mss" if kind == "tcp option" => "maxseg".to_owned(),
+            _ => name,
+        };
         let desc = format!("{kind} {name}");
         match self.peek_word() {
             Some("exists") | Some("missing") => Ok(Expr::Exthdr {

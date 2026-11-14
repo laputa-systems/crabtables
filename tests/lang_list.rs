@@ -156,3 +156,38 @@ table inet t {
 ",
     );
 }
+
+#[test]
+fn nat_port_fields_and_protocol_ranges() {
+    check(
+        "table ip t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    tcp dport 1 dnat to :tcp dport
+    tcp dport 2 redirect to :tcp dport
+    tcp dport 3 dnat to 1.2.3.4:tcp sport
+    dnat to 1.2.3.4:tcp dport random
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    tcp dport 1 masquerade to :tcp dport
+    tcp dport 2 snat to 1.2.3.4:tcp sport
+  }
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    tcp dport 1 tproxy to :tcp dport
+  }
+  chain c {
+    type filter hook input priority filter; policy accept;
+    meta l4proto 6-17 accept
+    meta l4proto { icmp, 6-17 } accept
+    meta l4proto != 6-17 accept
+    meta l4proto vmap { 6-17 : accept }
+    ip protocol 6-17 accept
+    tcp option maxseg exists accept
+    tcp option maxseg size 1460 accept
+  }
+}
+",
+    );
+}

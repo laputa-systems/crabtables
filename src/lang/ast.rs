@@ -518,6 +518,9 @@ pub struct Rule {
     pub span: Span,
     /// Locations of the statements (parsed rules).
     pub stmt_spans: Vec<Span>,
+    /// Locations nft reports for the statements themselves: the keyword of
+    /// `reject`, `queue` and NAT, the whole statement otherwise.
+    pub stmt_locs: Vec<Span>,
 }
 
 /// Base chain parameters.

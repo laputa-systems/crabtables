@@ -217,6 +217,7 @@ impl P<'_> {
                 let o = Opts {
                     service: false,
                     reverse_dns: false,
+                    numeric_proto: true,
                     ..*self.o
                 };
                 let p = P {
@@ -1037,7 +1038,14 @@ impl P<'_> {
                 self.expr(lo, Ctx::Plain),
                 self.expr(hi, Ctx::Plain)
             ),
-            a => format!("[{}]", self.expr(a, Ctx::Plain)),
+            a => {
+                let text = self.expr(a, Ctx::Plain);
+                if text.starts_with('[') && text.ends_with(']') {
+                    text
+                } else {
+                    format!("[{text}]")
+                }
+            }
         }
     }
 }

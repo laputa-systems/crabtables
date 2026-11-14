@@ -1137,10 +1137,24 @@ fn parse_int(s: &str) -> Option<u128> {
 pub fn parse(t: &Type, text: &str, len: usize) -> Result<Vec<u8>> {
     let bad = || match t.kind {
         // nft resolves unparsable addresses as host names.
-        Kind::Ipv4 | Kind::Ipv6 => Error::about(
-            "Could not resolve hostname: Name or service not known",
-            text,
-        ),
+        Kind::Ipv4 | Kind::Ipv6 => {
+            let other_family = if t.kind == Kind::Ipv4 {
+                text.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<Ipv6Addr>()
+                    .is_ok()
+            } else {
+                text.parse::<std::net::Ipv4Addr>().is_ok()
+            };
+            Error::about(
+                if other_family {
+                    "Could not resolve hostname: Address family for hostname not supported"
+                } else {
+                    "Could not resolve hostname: Name or service not known"
+                },
+                text,
+            )
+        }
         _ => Error::about(format!("Could not parse {} value `{text}`", t.name), text),
     };
     let int = |v: u128| -> Result<Vec<u8>> {
