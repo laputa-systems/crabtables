@@ -780,7 +780,7 @@ impl P<'_> {
                         _ => None,
                     }
                 };
-                let per_line = if self.o.inline_elements {
+                let per_line = if self.o.inline_elements && !s.is_map {
                     usize::MAX
                 } else {
                     per_line.unwrap_or(1)
@@ -1040,7 +1040,7 @@ impl P<'_> {
             ),
             a => {
                 let text = self.expr(a, Ctx::Plain);
-                if text.starts_with('[') && text.ends_with(']') {
+                if matches!(a, Expr::Payload { .. }) || (text.starts_with('[') && text.ends_with(']')) {
                     text
                 } else {
                     format!("[{text}]")

@@ -191,3 +191,59 @@ fn nat_port_fields_and_protocol_ranges() {
 ",
     );
 }
+
+#[test]
+fn transport_dependencies_and_full_width_masks() {
+    check(
+        "table ip t {
+  chain c {
+    type filter hook input priority filter; policy accept;
+    ct protocol tcp tcp dport 1 accept
+    meta l4proto 99 th dport 1 accept
+    meta l4proto { tcp, tcp } tcp dport 1 accept
+    meta l4proto { 2-5, 6 } tcp dport 1 accept
+    meta l4proto { 6, 17-20 } accept
+    ip protocol 99 tcp dport 1 accept
+    icmpv6 type echo-request accept
+    icmpv6 code 1 accept
+    reject with tcp reset
+    ip protocol tcp reject with tcp reset
+    meta l4proto tcp reject with tcp reset
+    ip protocol 99 reject with tcp reset
+    meta l4proto tcp counter reject with tcp reset
+    ip saddr and 255.255.255.255 . udp dport and 0xfff0 vmap { 1.2.3.4 . 12320 : drop }
+    ip saddr . udp dport & 0xffff vmap { 1.2.3.4 . 12320 : drop }
+    ip saddr & 255.255.255.255 == 1.2.3.4 accept
+    meta mark & 0xffffffff . tcp dport vmap { 1 . 80 : accept }
+  }
+}
+table ip6 s {
+  chain c {
+    type filter hook input priority filter; policy accept;
+    icmp type echo-request accept
+    ip6 saddr & ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff . tcp dport & 0xfff0 vmap { ::1 . 80 : drop }
+  }
+}
+table ip n {
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    tcp dport 1 snat to ip saddr:tcp sport
+    tcp dport 2 snat to ip daddr
+  }
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    tcp dport 3 dnat to ip saddr:80-90 random
+  }
+}
+table netdev nd {
+  chain c {
+    type filter hook ingress device d0 priority filter; policy accept;
+    fwd to d0
+    fwd ip to ip saddr device d0
+    fwd ip6 to ip6 daddr device eth0
+    fwd to iif
+  }
+}
+",
+    );
+}

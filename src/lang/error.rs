@@ -12,6 +12,9 @@ pub enum Related {
     /// The start of the error's location up to this text (`ip saddr` of
     /// `ip saddr @set`).
     To(Box<str>),
+    /// The start of the error's location up to this text (`fwd to ` of `fwd
+    /// to meta mark`).
+    Before(Box<str>),
     /// The whole location of the error (before narrowing it to `needle`).
     Whole,
     /// The first word of the error's location (`dnat` of `dnat to 1.2.3.4:80`).
@@ -144,6 +147,13 @@ impl Error {
                 start: whole.start,
                 end: whole.start + x.find(char::is_whitespace).unwrap_or(x.len()),
             }),
+            Some(Related::Before(t)) => input
+                .get(whole.start..whole.end)
+                .and_then(|x| x.rfind(&**t))
+                .map(|i| Span {
+                    start: whole.start,
+                    end: whole.start + i,
+                }),
             Some(Related::To(t)) => input
                 .get(whole.start..whole.end)
                 .and_then(|x| x.find(&**t))

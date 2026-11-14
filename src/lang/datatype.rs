@@ -1155,6 +1155,7 @@ pub fn parse(t: &Type, text: &str, len: usize) -> Result<Vec<u8>> {
                 text,
             )
         }
+        Kind::Protocol => Error::about("Could not resolve protocol name", text),
         _ => Error::about(format!("Could not parse {} value `{text}`", t.name), text),
     };
     let int = |v: u128| -> Result<Vec<u8>> {
@@ -1253,7 +1254,7 @@ pub fn parse(t: &Type, text: &str, len: usize) -> Result<Vec<u8>> {
             let s = text.trim_matches('"');
             let i = parse_int(s).map(|v| v as u32).or_else(|| ifindex_of(s));
             i.map_or_else(
-                || Err(Error::msg(format!("Interface does not exist: {s}"))),
+                || Err(Error::about("Interface does not exist", text)),
                 |i| int(u128::from(i)),
             )
         }

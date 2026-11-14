@@ -2214,17 +2214,11 @@ fn query_cases(f: Fam) -> Vec<Case> {
             })],
         ),
     ];
-    let mut d4 = mk("json_get_map_element", vec![get("get-map-element", "qs", "m", mapkey, true)]);
-    d4.marker = Marker::Known(
-        "CRAB-7-D5: `get element` on a map. nft prints the map with the matching element; nfcrt rejects the query with `map elements need data`.",
-    );
-    let mut d5 = mk("json_describe_unknown_symbol", vec![describe("describe-unknown", &["nosuchthing"], true)]);
-    d5.marker = Marker::Known(
-        "CRAB-7-D6: `describe` of an unresolvable word. nft exits 0 and prints `symbol expression, datatype invalid (invalid)`; nfcrt rejects it with a syntax error.",
-    );
+    let map_element = mk("json_get_map_element", vec![get("get-map-element", "qs", "m", mapkey, true)]);
+    let unknown_symbol = mk("json_describe_unknown_symbol", vec![describe("describe-unknown", &["nosuchthing"], true)]);
     let add_get = format!("add element {t} qs s {{ {} }}\nget element {t} qs s {{ {} }}\n", "10.7.0.1", "10.7.0.1");
     let add_get = if f == Fam::V6 { add_get.replace("10.7.0.1", "fd00:ad::1") } else { add_get };
-    let mut d6 = mk(
+    let get_inside_replacement = mk(
         "get_inside_replacement",
         vec![Step::Cli(Cli {
             label: "add-then-get",
@@ -2236,10 +2230,7 @@ fn query_cases(f: Fam) -> Vec<Case> {
             reference_may_crash: false,
         })],
     );
-    d6.marker = Marker::Known(
-        "CRAB-7-D7: `get element` of an element added earlier in the same file. nft evaluates `get` against its pre-commit cache, fails with `No such file or directory` and sends nothing; nfcrt queries after the commit, succeeds and installs the file.",
-    );
-    let mut d7 = update_case_with(
+    let keyword_chain_name = update_case_with(
         f,
         format!("cli.reject_keyword_chain_name.{tag}"),
         "cli",
@@ -2256,10 +2247,7 @@ fn query_cases(f: Fam) -> Vec<Case> {
         Policy2::A,
         false,
     );
-    d7.marker = Marker::Known(
-        "CRAB-7-D8: a bare keyword (`fwd`) as a chain name. nft rejects it with a syntax error and installs nothing; nfcrt accepts it and creates the chain.",
-    );
-    out.extend([d4, d5, d6, d7]);
+    out.extend([map_element, unknown_symbol, get_inside_replacement, keyword_chain_name]);
     out
 }
 
@@ -2524,11 +2512,7 @@ fn concat_full_width_case(f: Fam) -> Case {
         lister: true,
         ..Default::default()
     }));
-    let mut c = b.finish(format!("expr.concat_full_width_mask.{}", f.tag()), "expressions");
-    c.marker = Marker::Known(
-        "CRAB-7-D9: an all-ones address mask in a concatenation key. Packet decisions agree, but nft drops the no-op mask from the rule where nfcrt keeps `saddr & <full mask>`, so the listings differ.",
-    );
-    c
+    b.finish(format!("expr.concat_full_width_mask.{}", f.tag()), "expressions")
 }
 
 fn all_cases() -> Vec<Case> {

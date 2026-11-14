@@ -189,6 +189,179 @@ const STMT_KEYWORDS: &[&str] = &[
     "mark",
 ];
 
+/// Words nft's scanner returns as keywords where a name is expected, so
+/// that they cannot be names (nft 1.1.3).
+const RESERVED: &[&str] = &[
+    "accept",
+    "add",
+    "ah",
+    "all",
+    "arp",
+    "auto-merge",
+    "bridge",
+    "cgroup",
+    "chain",
+    "comment",
+    "comp",
+    "constant",
+    "continue",
+    "counter",
+    "cpu",
+    "create",
+    "ct",
+    "day",
+    "dccp",
+    "define",
+    "delete",
+    "describe",
+    "destroy",
+    "device",
+    "devices",
+    "dnat",
+    "drop",
+    "dst",
+    "dup",
+    "dynamic",
+    "ecn",
+    "element",
+    "elements",
+    "esp",
+    "ether",
+    "exists",
+    "expires",
+    "export",
+    "exthdr",
+    "fib",
+    "flags",
+    "flow",
+    "flowtable",
+    "flush",
+    "frag",
+    "fwd",
+    "gc-interval",
+    "geneve",
+    "get",
+    "goto",
+    "gre",
+    "gretap",
+    "handle",
+    "hbh",
+    "hook",
+    "hour",
+    "ibriport",
+    "ibrname",
+    "icmp",
+    "icmpv6",
+    "igmp",
+    "iif",
+    "iifgroup",
+    "iifname",
+    "iiftype",
+    "import",
+    "include",
+    "index",
+    "inet",
+    "insert",
+    "interval",
+    "ip",
+    "ip6",
+    "ipsec",
+    "jhash",
+    "jump",
+    "limit",
+    "list",
+    "log",
+    "map",
+    "mark",
+    "masquerade",
+    "meta",
+    "meter",
+    "mh",
+    "missing",
+    "monitor",
+    "netdev",
+    "nftrace",
+    "notrack",
+    "numgen",
+    "obriport",
+    "obrname",
+    "offload",
+    "oif",
+    "oifgroup",
+    "oifname",
+    "oiftype",
+    "osf",
+    "pkttype",
+    "policy",
+    "position",
+    "priority",
+    "queue",
+    "quota",
+    "random",
+    "redefine",
+    "redirect",
+    "reject",
+    "rename",
+    "replace",
+    "reset",
+    "return",
+    "rt",
+    "rt0",
+    "rt2",
+    "rtclassid",
+    "rule",
+    "ruleset",
+    "sctp",
+    "secmark",
+    "set",
+    "size",
+    "skgid",
+    "skuid",
+    "snat",
+    "socket",
+    "srh",
+    "symhash",
+    "synproxy",
+    "table",
+    "tcp",
+    "th",
+    "time",
+    "timeout",
+    "tproxy",
+    "type",
+    "typeof",
+    "udp",
+    "udplite",
+    "undefine",
+    "update",
+    "vlan",
+    "vmap",
+    "vni",
+    "vxlan",
+    "xt",
+];
+
+/// Whether nft's scanner returns `w` as a keyword or operator token.
+pub(super) fn is_reserved(w: &str) -> bool {
+    RESERVED.contains(&w) || OPERATOR_WORDS.iter().any(|(k, _)| *k == w)
+}
+
+/// nft names the token of these operator words by their symbols.
+const OPERATOR_WORDS: &[(&str, &str)] = &[
+    ("and", "&"),
+    ("or", "'|'"),
+    ("xor", "^"),
+    ("not", "!"),
+    ("eq", "=="),
+    ("ne", "!="),
+    ("le", "<="),
+    ("ge", ">="),
+    ("lt", "<"),
+    ("gt", ">"),
+    ("lshift", "<<"),
+    ("rshift", ">>"),
+];
+
 /// Words nft's scanner treats as keywords (named in syntax errors).
 const KEYWORDS: &[&str] = &[
     "table",
@@ -499,6 +672,34 @@ impl Parser {
         }
     }
 
+    /// A name. nft's scanner returns keywords, numbers and quoted strings as
+    /// tokens of their own, which are no names.
+    fn ident(&mut self, what: &str) -> Result<String> {
+        self.expand();
+        let found = match self.peek() {
+            Some(Tok::Str(_)) => Some("quoted string".to_owned()),
+            Some(Tok::Word(w)) => {
+                if let Some((_, sym)) = OPERATOR_WORDS.iter().find(|(k, _)| k == w) {
+                    Some((*sym).to_owned())
+                } else if RESERVED.contains(&w.as_str()) {
+                    Some(w.clone())
+                } else if w.chars().all(|c| c.is_ascii_digit())
+                    || w.starts_with("0x")
+                    || w.starts_with("0b")
+                {
+                    Some("number".to_owned())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        match found {
+            Some(f) => self.err(format!("syntax error, unexpected {f}, expecting {what}")),
+            None => self.word(what),
+        }
+    }
+
     fn string(&mut self, what: &str) -> Result<String> {
         self.expand();
         match self.peek() {
@@ -531,6 +732,14 @@ impl Parser {
             w.parse().ok()
         };
         n.ok_or_else(|| Error::at(format!("expected {what}, got `{w}`"), span))
+    }
+
+    fn truncated(&mut self, what: &str) -> Result<u64> {
+        self.expand();
+        if !matches!(self.peek_word(), Some(w) if w.starts_with(|c: char| c.is_ascii_digit())) {
+            return self.unexpected("number");
+        }
+        self.number(what)
     }
 
     fn eat_word(&mut self, w: &str) -> bool {
@@ -874,14 +1083,14 @@ impl Parser {
     fn table_ref(&mut self) -> Result<(Family, String)> {
         let f = self.family();
         self.tspan = self.span();
-        let t = self.word("string or last")?;
+        let t = self.ident("string or last")?;
         Ok((f, t))
     }
 
     /// A name and its location.
     fn name(&mut self) -> Result<(String, Span)> {
         let span = self.span();
-        Ok((self.word("string or last")?, span))
+        Ok((self.ident("string or last")?, span))
     }
 
     fn handle(&mut self) -> Result<Option<u64>> {
@@ -1042,7 +1251,7 @@ impl Parser {
                     if k != ObjKind::Table && self.eat_word("table") {
                         let family = self.family();
                         let table_span = self.span();
-                        let table = self.word("string or last")?;
+                        let table = self.ident("string or last")?;
                         Target {
                             family: Some(family),
                             table: Some(table),
@@ -1109,7 +1318,7 @@ impl Parser {
                     } else if self.eat_word("table") {
                         t.family = Some(self.family());
                         t.table_span = self.span();
-                        t.table = Some(self.word("string or last")?);
+                        t.table = Some(self.ident("string or last")?);
                     }
                     t
                 } else {
@@ -1124,11 +1333,29 @@ impl Parser {
             "rename" => {
                 self.expect_word("chain")?;
                 let target = self.target(ObjKind::Chain)?;
-                let new_name = self.word("new chain name")?;
+                let new_name = self.ident("string or last")?;
                 Ok(vec![Cmd::Rename { target, new_name }])
             }
             "describe" => {
+                let word = self.span();
                 let e = self.primary()?;
+                // nft's scanner ends a number or address before `-` and `/`.
+                if let Expr::Value(Value::Raw(w)) = &e {
+                    let numeric = w.starts_with(|c: char| c.is_ascii_digit());
+                    let cut = w.find(|c: char| c == '/' || (numeric && c == '-'));
+                    if let Some(i) = cut {
+                        return Err(Error::at(
+                            format!(
+                                "syntax error, unexpected {}, expecting end of file or newline or semicolon",
+                                &w[i..=i]
+                            ),
+                            Span {
+                                start: word.start + i,
+                                end: word.start + i + 1,
+                            },
+                        ));
+                    }
+                }
                 if !self.at_end() {
                     return self.unexpected("end of file or newline or semicolon");
                 }
@@ -1278,11 +1505,11 @@ impl Parser {
                 return Ok(t);
             }
             t.table_span = self.span();
-            t.table = Some(self.word(name)?);
+            t.table = Some(self.ident(name)?);
             return Ok(t);
         }
         t.table_span = self.span();
-        t.table = Some(self.word("string or last")?);
+        t.table = Some(self.ident("string or last")?);
         if self.peek_word() == Some("handle") {
             t.handle_span = self.span_at(1);
         }
@@ -1292,7 +1519,7 @@ impl Parser {
         }
         if k == ObjKind::Rule && delete {
             t.name_span = self.span();
-            t.name = Some(self.word("string or last")?);
+            t.name = Some(self.ident("string or last")?);
             t.handle_span = self.span_at(1);
             if !self.eat_word("handle") {
                 return self.unexpected("keyword handle");
@@ -1301,7 +1528,7 @@ impl Parser {
             return Ok(t);
         }
         t.name_span = self.span();
-        t.name = Some(self.word(name)?);
+        t.name = Some(self.ident(name)?);
         if k == ObjKind::Rule || self.peek_word() == Some("handle") {
             t.handle_span = self.span_at(1);
             t.handle = self.handle()?;
@@ -1899,24 +2126,18 @@ impl Parser {
                     "l3proto" => *l3proto = Some(self.word("l3proto")?),
                     _ => return self.err("unexpected ct expectation attribute"),
                 },
-                ObjBody::Synproxy { mss, wscale, flags } => {
+                // (nft takes the attributes in a row, without separators.)
+                ObjBody::Synproxy { mss, wscale, flags } => loop {
                     match self.word("synproxy attribute")?.as_str() {
                         "mss" => *mss = self.number("mss")?,
                         "wscale" => *wscale = self.number("wscale")?,
-                        f @ ("timestamp" | "sack-perm") => {
-                            flags.push(f.to_owned());
-                            while let Some(f) = self
-                                .peek_word()
-                                .filter(|f| matches!(*f, "timestamp" | "sack-perm"))
-                                .map(str::to_owned)
-                            {
-                                self.pos += 1;
-                                flags.push(f);
-                            }
-                        }
+                        f @ ("timestamp" | "sack-perm") => flags.push(f.to_owned()),
                         _ => return self.err("unexpected synproxy attribute"),
                     }
-                }
+                    if self.at_end() {
+                        break;
+                    }
+                },
                 ObjBody::Secmark(ctx) => *ctx = self.string("security context")?,
             }
             self.end_item()?;
@@ -2110,7 +2331,7 @@ impl Parser {
                         Verdict::JumpBlock(rules)
                     }
                 } else {
-                    let c = self.word("chain name")?;
+                    let c = self.ident("'{'")?;
                     if goto {
                         Verdict::Goto(c)
                     } else {
@@ -2201,7 +2422,10 @@ impl Parser {
                 end: self.prev_end(),
             };
             locs.push(
-                if matches!(st, Stmt::Reject { .. } | Stmt::Queue { .. } | Stmt::Nat { .. }) {
+                if matches!(
+                st,
+                Stmt::Reject { .. } | Stmt::Queue { .. } | Stmt::Nat { .. } | Stmt::Synproxy { .. }
+            ) {
                     self.toks[start_tok].span
                 } else {
                     Span {
@@ -2286,13 +2510,14 @@ impl Parser {
                 let (mut mss, mut wscale, mut flags) = (None, None, Vec::new());
                 loop {
                     match self.peek_word() {
+                        // (nft keeps the low bits of a larger number.)
                         Some("mss") => {
                             self.pos += 1;
-                            mss = Some(self.number("mss")?);
+                            mss = Some(self.truncated("mss")? as u16);
                         }
                         Some("wscale") => {
                             self.pos += 1;
-                            wscale = Some(self.number("wscale")?);
+                            wscale = Some(self.truncated("wscale")? as u8);
                         }
                         Some(f @ ("timestamp" | "sack-perm")) => {
                             flags.push(f.to_owned());
@@ -2441,7 +2666,10 @@ impl Parser {
                 let (mut addr, mut port) = (None, None);
                 if self.eat_word("to") {
                     let start = self.pos;
-                    let (a, p) = self.addr_port(family.as_deref() == Some("ip6"))?;
+                    let (a, p) = self.addr_port(
+                        family.as_deref() == Some("ip6"),
+                        kind == NatKind::Redirect,
+                    )?;
                     if kind == NatKind::Masquerade && a.is_some() {
                         self.pos = start;
                         return self.unexpected("colon");
@@ -2486,7 +2714,7 @@ impl Parser {
                     _ => None,
                 };
                 self.expect_word("to")?;
-                let (addr, port) = self.addr_port(family.as_deref() == Some("ip6"))?;
+                let (addr, port) = self.addr_port(family.as_deref() == Some("ip6"), false)?;
                 Ok(Stmt::Tproxy { family, addr, port })
             }
             "queue" => {
@@ -2539,20 +2767,35 @@ impl Parser {
                     }
                     _ => None,
                 };
-                self.expect_word("to")?;
-                let first = self.expr()?;
-                if self.eat_word("device") {
-                    let dev = self.expr()?;
-                    return Ok(Stmt::Fwd {
-                        family,
-                        addr: Some(first),
-                        dev,
+                if !self.eat_word("to") {
+                    return self.unexpected(if family.is_some() {
+                        "keyword to"
+                    } else {
+                        "to or ip or ip6"
                     });
                 }
+                if self.peek_word() == Some("device") {
+                    return self.unexpected("");
+                }
+                let first = self.expr()?;
+                if family.is_none() {
+                    if self.peek_word() == Some("device") {
+                        return self.unexpected("end of file or newline or semicolon");
+                    }
+                    return Ok(Stmt::Fwd {
+                        family,
+                        addr: None,
+                        dev: first,
+                    });
+                }
+                if !self.eat_word("device") {
+                    return self.unexpected("keyword device");
+                }
+                let dev = self.expr()?;
                 Ok(Stmt::Fwd {
                     family,
-                    addr: None,
-                    dev: first,
+                    addr: Some(first),
+                    dev,
                 })
             }
             "notrack" => {
@@ -2698,31 +2941,78 @@ impl Parser {
     /// the colon after the address is unexpected.
     fn redirect_address(&self, start: usize) -> Error {
         let sp = self.toks[start].span;
-        let Some(Tok::Word(w)) = self.toks.get(start).map(|t| &t.tok) else {
-            return Error::at(
+        let unexpected = |at: Span| {
+            Error::at(
                 "syntax error, unexpected colon, expecting end of file or newline or semicolon",
-                self.toks[self.pos - 1].span,
-            );
+                at,
+            )
         };
-        let colon = if w.starts_with('[') {
-            w.find("]:").map(|i| i + 1)
+        let word = match self.toks.get(start).map(|t| &t.tok) {
+            Some(Tok::Word(w)) if w.contains(':') => w,
+            _ => return unexpected(self.toks[self.pos - 1].span),
+        };
+        let colon = if word.starts_with('[') {
+            word.find("]:").map(|i| i + 1)
         } else {
-            w.find(':')
+            word.find(':')
         }
         .unwrap_or(0);
-        if w[..colon].chars().all(|c| c.is_ascii_digit()) {
+        // nft's scanner takes what looks like a number as one token with
+        // the rest.
+        let head = &word[..colon];
+        if head.chars().all(|c| c.is_ascii_hexdigit() || c == '-') && !head.starts_with('-') {
+            // (After a hyphen the word is a token of its own.)
+            let from = head.rfind('-').map_or(0, |i| i + 1);
             return Error::at(
                 "Could not resolve service: Servname not supported for ai_socktype",
-                sp,
+                Span {
+                    start: sp.start + from,
+                    end: sp.end,
+                },
             );
         }
-        Error::at(
-            "syntax error, unexpected colon, expecting end of file or newline or semicolon",
-            Span {
-                start: sp.start + colon,
-                end: sp.start + colon + 1,
+        unexpected(Span {
+            start: sp.start + colon,
+            end: sp.start + colon + 1,
+        })
+    }
+
+    fn split_field_colon(&mut self, valid: impl Fn(&str) -> bool) {
+        let Some(Tok::Word(w)) = self.peek().cloned() else {
+            return;
+        };
+        let Some((head, tail)) = w.split_once(':') else {
+            return;
+        };
+        if head.is_empty() || tail.is_empty() || tail.contains(':') || !valid(head) {
+            return;
+        }
+        let sp = self.span();
+        let colon = sp.start + head.len();
+        let parts = [
+            Token {
+                tok: Tok::Word(head.to_owned()),
+                span: Span {
+                    start: sp.start,
+                    end: colon,
+                },
             },
-        )
+            Token {
+                tok: Tok::Punct(":"),
+                span: Span {
+                    start: colon,
+                    end: colon + 1,
+                },
+            },
+            Token {
+                tok: Tok::Word(tail.to_owned()),
+                span: Span {
+                    start: colon + 1,
+                    end: sp.end,
+                },
+            },
+        ];
+        self.toks.splice(self.pos..=self.pos, parts);
     }
 
     /// `addr[:port]`, `:port`, `[v6addr]:port`, `addr map {...}`, ...
@@ -2770,7 +3060,7 @@ impl Parser {
         self.toks.splice(self.pos..=self.pos, parts);
     }
 
-    fn addr_port(&mut self, v6: bool) -> Result<(Option<Expr>, Option<Expr>)> {
+    fn addr_port(&mut self, v6: bool, redirect: bool) -> Result<(Option<Expr>, Option<Expr>)> {
         self.split_port_expr();
         // `to :1000-2000`
         if self.eat_punct(":") {
@@ -2805,6 +3095,14 @@ impl Parser {
             }
         }
         let a = self.expr()?;
+        // `redirect to` takes a port only: a colon after anything else is
+        // unexpected.
+        if redirect && self.is_punct(":") {
+            return Err(Error::at(
+                "syntax error, unexpected colon, expecting end of file or newline or semicolon",
+                self.span(),
+            ));
+        }
         let port = if self.eat_punct(":") {
             Some(self.expr()?)
         } else {
@@ -3299,6 +3597,7 @@ impl Parser {
             }
             p if proto::proto(p).is_some() && self.peek_word().is_some() => {
                 let pr = proto::proto(p).unwrap();
+                self.split_field_colon(|f| pr.field(f).is_some());
                 let mut f = self.peek_word().unwrap().to_owned();
                 if pr.name == "arp" && matches!(f.as_str(), "saddr" | "daddr") {
                     self.pos += 1;

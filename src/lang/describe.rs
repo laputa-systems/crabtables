@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use super::ast::Expr;
+use super::ast::{Expr, Value};
 use super::datatype::{self, Kind, Symbols, id};
 use super::error::{Error, Result};
 use super::proto;
@@ -175,6 +175,8 @@ fn expr_type(e: &Expr) -> Result<(&'static str, u32, u32)> {
             "ip6 saddr" | "ip6 daddr" => ("xfrm", id::IP6ADDR, 128),
             _ => ("xfrm", id::INTEGER, 32),
         },
+        // A word that is no expression is a symbol without a type.
+        Expr::Value(Value::Raw(w)) if !super::parse::is_reserved(w) => ("symbol", id::INVALID, 0),
         _ => return Err(Error::msg("syntax error, unexpected expression")),
     })
 }

@@ -1117,6 +1117,7 @@ struct Dec<'a, 'b> {
     deps: Vec<(usize, Provides)>,
     l3: Option<u16>,
     l4: Option<u8>,
+    l4_unknown: bool,
     ether: bool,
     vlan: bool,
 }
@@ -1256,11 +1257,7 @@ impl Dec<'_, '_> {
                 .and_then(proto::network)
                 .into_iter()
                 .collect(),
-            PayloadBase::Transport => {
-                let mut v: Vec<&Proto> = self.l4.and_then(proto::transport).into_iter().collect();
-                v.push(proto::proto("th").unwrap());
-                v
-            }
+            PayloadBase::Transport => self.transport_candidates(),
             _ => Vec::new(),
         };
         for p in candidates.iter().copied() {
@@ -1342,11 +1339,7 @@ impl Dec<'_, '_> {
                 .and_then(proto::network)
                 .into_iter()
                 .collect(),
-            PayloadBase::Transport => {
-                let mut v: Vec<&Proto> = self.l4.and_then(proto::transport).into_iter().collect();
-                v.push(proto::proto("th").unwrap());
-                v
-            }
+            PayloadBase::Transport => self.transport_candidates(),
             PayloadBase::LinkLayer => vec![proto::proto("ether").unwrap()],
             _ => Vec::new(),
         };
@@ -1468,6 +1461,7 @@ impl Dec<'_, '_> {
                 _ => None,
             },
             Expr::Meta(k) if k == "l4proto" => Some(Provides::L4(byte(0))),
+            Expr::Ct { key, .. } if key == "protocol" => Some(Provides::L4(byte(0))),
             Expr::Meta(k) if k == "protocol" => {
                 Some(Provides::L3Proto(u16::from_be_bytes([byte(0), byte(1)])))
             }
@@ -1488,10 +1482,25 @@ impl Dec<'_, '_> {
         }
     }
 
+    /// nft lists no `th` field after a `meta l4proto` of a protocol it does
+    /// not know.
+    fn transport_candidates(&self) -> Vec<&'static Proto> {
+        let mut v: Vec<&Proto> = self.l4.and_then(proto::transport).into_iter().collect();
+        if !self.l4_unknown {
+            v.push(proto::proto("th").unwrap());
+        }
+        v
+    }
+
     fn apply_dep(&mut self, p: Provides) {
+        self.l4_unknown = false;
         match p {
+            Provides::L4(n) => {
+                self.l4 = Some(n);
+                self.l4_unknown = proto::transport(n).is_none();
+            }
             Provides::L3(t) | Provides::L3Proto(t) => self.l3 = Some(t),
-            Provides::L4(n) | Provides::L4Payload(n) => self.l4 = Some(n),
+            Provides::L4Payload(n) => self.l4 = Some(n),
             Provides::Ether => self.ether = true,
             Provides::Vlan => {
                 self.vlan = true;
@@ -2065,6 +2074,11 @@ impl Dec<'_, '_> {
             let mask = b.mask.clone().unwrap_or_default();
             let xor = b.xor.clone().unwrap_or_default();
             let xor_zero = xor.iter().all(|&x| x == 0);
+            // nft does not show a mask that keeps every bit.
+            if xor_zero && !mask.is_empty() && mask.iter().all(|&x| x == 0xff) {
+                self.regs.insert(word(b.dreg), src);
+                return;
+            }
             // A mask selecting a sub-byte field of a payload load.
             if let (Some((base, off, len)), true) = (src.load, xor_zero) {
                 if let Some(rv) = self.resolve(base, off, len, Some(&mask)) {
@@ -2158,11 +2172,7 @@ impl Dec<'_, '_> {
                 .and_then(proto::network)
                 .into_iter()
                 .collect(),
-            PayloadBase::Transport => {
-                let mut v: Vec<&Proto> = self.l4.and_then(proto::transport).into_iter().collect();
-                v.push(proto::proto("th").unwrap());
-                v
-            }
+            PayloadBase::Transport => self.transport_candidates(),
             PayloadBase::LinkLayer if self.l2_ether() => vec![proto::proto("ether").unwrap()],
             _ => Vec::new(),
         };
@@ -2347,6 +2357,17 @@ impl Dec<'_, '_> {
     }
 
     fn reject(&mut self, r: &kx::Reject) {
+        // nft takes the match right before `reject with tcp reset` for its
+        // dependency.
+        if r.ty == nft::RejectType::TcpRst && matches!(self.family, Family::Ipv4 | Family::Ipv6) {
+            let last = self.stmts.len().wrapping_sub(1);
+            if let Some(i) = self.deps.iter().position(|(idx, prov)| {
+                *idx == last && matches!(prov, Provides::L4(_) | Provides::L4Payload(_))
+            }) {
+                let (idx, _) = self.deps.remove(i);
+                self.stmts[idx] = None;
+            }
+        }
         let code = r.icmp_code.unwrap_or(0);
         let (with, code) = match r.ty {
             nft::RejectType::TcpRst => (Some("tcp reset".to_owned()), None),
@@ -3028,6 +3049,7 @@ fn rule(env: &Env<'_>, r: &nft::Rule) -> Rule {
         deps: Vec::new(),
         l3: None,
         l4: None,
+        l4_unknown: false,
         ether: false,
         vlan: false,
     };

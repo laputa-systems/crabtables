@@ -585,24 +585,50 @@ fn run(
     // All changes of one input are a single kernel transaction, so a
     // rejection leaves the ruleset as it was. Like nft, which evaluates
     // every command before it lists anything, queries show the ruleset
-    // the input produces: they run in order after the commit.
+    // the input produces: they run in order after the commit. Queries of
+    // elements go to the kernel before the transaction, as in nft: they see
+    // the ruleset as it is, and a failed one stops the input unapplied.
+    let mut early: Vec<Option<Vec<u8>>> = vec![None; cmds.len()];
+    for (i, cs) in cmds.iter().enumerate() {
+        if !matches!(&cs.0, Cmd::Element { .. }) || !is_query(&cs.0) {
+            continue;
+        }
+        let mut text = Vec::new();
+        if let Err(e) = query(cli, sock, &cs.0, cs.1, &mut text) {
+            for done in early.iter().flatten() {
+                let _ = out.write_all(done);
+            }
+            report_query_error(e, prelude, input, file);
+            return false;
+        }
+        early[i] = Some(text);
+    }
     let pending: Vec<&(Cmd, Span)> = cmds.iter().filter(|cs| !is_query(&cs.0)).collect();
     if !transaction(cli, sock, &pending, prelude, input, file, out) {
+        for text in early.iter().flatten() {
+            let _ = out.write_all(text);
+        }
         return false;
     }
-    for cs in cmds.iter().filter(|cs| is_query(&cs.0)) {
-        if let Err(e) = query(cli, sock, &cs.0, cs.1, out) {
-            if e.source.as_ref().and_then(|s| s.errno()) == Some(EPERM) {
-                // (As nft, which needs the ruleset for queries.)
-                eprintln!("Operation not permitted (you must be root)");
-                eprintln!("netlink: Error: cache initialization failed: Operation not permitted");
-            } else {
-                report_in(e, prelude, input, file);
-            }
+    for (i, cs) in cmds.iter().enumerate().filter(|cs| is_query(&cs.1.0)) {
+        if let Some(text) = &early[i] {
+            let _ = out.write_all(text);
+        } else if let Err(e) = query(cli, sock, &cs.0, cs.1, out) {
+            report_query_error(e, prelude, input, file);
             return false;
         }
     }
     true
+}
+
+fn report_query_error(e: Error, prelude: &str, input: &str, file: Option<&str>) {
+    if e.source.as_ref().and_then(|s| s.errno()) == Some(EPERM) {
+        // (As nft, which needs the ruleset for queries.)
+        eprintln!("Operation not permitted (you must be root)");
+        eprintln!("netlink: Error: cache initialization failed: Operation not permitted");
+    } else {
+        report_in(e, prelude, input, file);
+    }
 }
 
 /// Report an error located in `prelude` (the -D definitions, shown like
@@ -838,25 +864,23 @@ fn query(
             table,
             set,
             elems,
-            table_span,
-            set_span,
             ..
         } => {
             let rs = sock.list_ruleset(Family::Unspec)?;
-            // A missing table or set is reported at its name.
+            let not_in_kernel = "Could not process rule: No such file or directory";
             if !rs
                 .tables
                 .iter()
                 .any(|t| t.family == *family && t.name == *table)
             {
-                return Err(Error::at("No such file or directory", *table_span));
+                return Err(Error::at(not_in_kernel, span));
             }
             if !rs
                 .sets
                 .iter()
                 .any(|(s, _)| s.family == *family && s.table == *table && s.name == *set)
             {
-                return Err(Error::at("No such file or directory", *set_span));
+                return Err(Error::at(not_in_kernel, span));
             }
             let text = crabtables::lang::get_elements(
                 sock,

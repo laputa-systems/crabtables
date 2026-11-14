@@ -2564,3 +2564,532 @@ fn ranges_with_spaces() {
     let cmds: Vec<&str> = cmds.iter().map(String::as_str).collect();
     compare(&cmds, &files);
 }
+
+#[test]
+fn conflicting_transport_layer_protocols() {
+    compare_in_tables(&[
+        "add rule ip t f tcp dport 1 udp dport 2 accept",
+        "add rule ip t f udp dport 1 tcp dport 2 accept",
+        "add rule ip t f tcp dport 1 tcp sport 2 accept",
+        "add rule ip t f tcp dport 1 icmp type echo-request accept",
+        "add rule ip t f icmp type echo-request tcp dport 1 accept",
+        "add rule ip t f tcp dport 1 sctp dport 2 accept",
+        "add rule ip t f tcp dport 1 ah spi 2 accept",
+        "add rule ip t f udp dport 1 udplite dport 2 accept",
+        "add rule ip t f tcp dport 1 tcp dport 2 udp dport 4 accept",
+        "add rule ip t f tcp dport 1 counter udp dport 2 accept",
+        "add rule ip t f tcp dport vmap { 1 : accept } udp dport 2 accept",
+        "add rule ip t f tcp dport 1 udp dport { 1 }",
+        "add rule ip t f tcp dport 1 th dport 2 udp dport 1 accept",
+        "add rule ip t f th dport 2 tcp dport 1 accept",
+        "add rule ip t f tcp dport 1 tcp option maxseg size 1 udp dport 2 accept",
+        "add rule ip t f tcp flags syn tcp dport 1 udp dport 2 accept",
+        "add rule ip t f ip saddr 1.1.1.1 tcp dport 1 udp dport 2 accept",
+        "add rule inet i f tcp dport 1 udp dport 2 accept",
+        "add rule ip6 s f tcp dport 1 udp dport 2 accept",
+        "add rule ip6 s f tcp dport 1 icmpv6 type echo-request accept",
+    ]);
+}
+
+#[test]
+fn transport_protocol_matches_and_dependencies() {
+    compare_in_tables(&[
+        "add rule ip t f meta l4proto tcp udp dport 2 accept",
+        "add rule ip t f meta l4proto udp tcp dport 2 accept",
+        "add rule ip t f meta l4proto tcp tcp dport 2 accept",
+        "add rule ip t f ip protocol tcp udp dport 2 accept",
+        "add rule ip t f ip protocol udp tcp dport 2 accept",
+        "add rule ip t f ip protocol tcp tcp dport 2 accept",
+        "add rule ip t f ip protocol 99 tcp dport 1 accept",
+        "add rule ip t f meta l4proto 99 tcp dport 1 accept",
+        "add rule ip t f meta l4proto { 99, 98 } tcp dport 1 accept",
+        "add rule ip t f meta l4proto 99 th dport 1 accept",
+        "add rule ip t f ct protocol tcp udp dport 1 accept",
+        "add rule ip t f ct protocol tcp tcp dport 1 accept",
+        "add rule ip t f ct original protocol udp tcp dport 1 accept",
+        "add rule ip t f meta l4proto != tcp udp dport 2 accept",
+        "add rule ip t f meta l4proto tcp meta l4proto != tcp udp dport 1 accept",
+        "add rule ip t f meta l4proto tcp meta l4proto != udp tcp dport 1 accept",
+        "add rule ip t f tcp dport 1 meta l4proto udp accept",
+        "add rule ip t f udp dport 1 ip protocol tcp accept",
+        "add rule ip t f meta l4proto 6-17 tcp dport 1 accept",
+        "add rule ip t f meta l4proto 17-17 tcp dport 3 accept",
+        "add rule ip t f meta l4proto { tcp } tcp dport 1 accept",
+        "add rule ip t f meta l4proto { tcp, tcp } tcp dport 1 accept",
+        "add rule ip t f meta l4proto { 2-5, 6 } tcp dport 1 accept",
+        "add rule ip t f meta l4proto { 2-5, 6 } udp dport 1 accept",
+        "add rule ip t f meta l4proto { 1, 2-5 } tcp dport 1 accept",
+        "add rule ip t f meta l4proto { tcp, udp } th dport 1 accept",
+        "add rule ip t f meta l4proto { tcp, udp } tcp dport 2 accept",
+        "add rule ip t f meta l4proto { tcp, udp } udp dport 2 accept",
+        "add rule ip t f meta l4proto { udp, tcp } sctp dport 1 accept",
+        "add rule ip t f meta l4proto { sctp, tcp, udp } udp dport 1 accept",
+        "add rule ip t f meta l4proto { tcp, udp } icmp type echo-request accept",
+        "add rule ip t f ip protocol { tcp, udp } udp dport 2 accept",
+        "add rule ip t f meta l4proto tcp meta l4proto udp tcp dport 3 accept",
+        "add rule ip t f meta l4proto 6 meta l4proto 17 udp dport 2 accept",
+        "add rule ip t f tcp dport 1 tcp dport 2 meta l4proto 17 udp dport 3 accept",
+        "add rule ip t f udp dport 2 meta l4proto 17 tcp dport 3 accept",
+        "add rule inet i f meta l4proto tcp ip6 nexthdr udp tcp dport 1 accept",
+        "add rule inet i f ip6 nexthdr udp tcp dport 1 accept",
+        "add rule ip6 s f ip6 nexthdr { tcp, udp } icmpv6 type echo-request accept",
+        "add rule ip6 s f ip6 nexthdr icmpv6 icmpv6 type echo-request accept",
+        "add rule ip t f meta l4proto { tcp, udp } reject with tcp reset",
+        "add rule ip t f meta l4proto { udp, tcp } reject with tcp reset",
+        "add rule ip t f meta l4proto 6 meta l4proto 17 reject with tcp reset",
+        "add rule ip t f ip protocol 99 reject with tcp reset",
+        "add rule ip t f udp dport 1 reject with tcp reset",
+        "add rule ip t f icmp type echo-request reject with tcp reset",
+        "add rule ip6 s f ip6 nexthdr udp reject with tcp reset",
+        "add rule ip t f tcp dport 1 reject with tcp reset",
+        "add rule ip t f reject with tcp reset",
+    ]);
+}
+
+#[test]
+fn nat_ports_conflict_with_transport_matches() {
+    compare_in_tables(&[
+        "add rule ip t pre tcp dport 1 dnat to 1.2.3.4:udp dport",
+        "add rule ip t pre tcp dport 1 dnat to :udp dport",
+        "add rule ip t pre tcp dport 1 redirect to :udp dport",
+        "add rule ip t pre tcp dport 1 dnat to 1.2.3.4:udp sport",
+        "add rule ip t pre tcp dport 1 dnat to 1.2.3.4:th dport",
+        "add rule ip t pre meta l4proto tcp dnat to 1.2.3.4:udp dport",
+        "add rule ip t pre ip protocol tcp dnat to 1.2.3.4:udp dport",
+        "add rule ip t pre meta l4proto { tcp, udp } dnat to 1.2.3.4:udp dport",
+        "add rule ip t pre udp dport 1 dnat to 1.2.3.4:udp dport",
+        "add rule ip t pre dnat to 1.2.3.4:udp dport",
+        "add rule ip t pre tcp dport 1 dnat to 1.2.3.4:tcp dport",
+        "add rule ip t mg tcp dport 1 tproxy to :udp dport",
+        "add rule ip t mg tcp dport 1 tproxy to 1.2.3.4:udp sport",
+        "add rule ip t mg udp dport 1 tproxy to :udp dport",
+        "add rule inet i pre tcp dport 1 dnat ip to 1.2.3.4:udp dport",
+        "add rule ip t post tcp dport 1 snat to 1.2.3.4:udp sport",
+        "add rule ip t post tcp dport 1 masquerade to :udp sport",
+    ]);
+}
+
+#[test]
+fn nat_address_from_a_header_field() {
+    compare_in_tables(&[
+        "add rule ip t post snat to ip saddr:tcp sport",
+        "add rule ip t post tcp dport 1 snat to ip saddr:tcp sport",
+        "add rule ip t post tcp dport 2 snat to ip daddr:tcp sport",
+        "add rule ip t post tcp dport 3 snat to ip saddr : tcp sport",
+        "add rule ip t post tcp dport 4 snat to ip saddr:80",
+        "add rule ip t post tcp dport 5 snat to ip saddr:80-90",
+        "add rule ip t post tcp dport 6 snat to ip saddr",
+        "add rule ip t post tcp dport 7 snat to ip saddr random",
+        "add rule ip t post tcp dport 8 snat to ip saddr:tcp sport random",
+        "add rule ip t post tcp dport 9 snat to ip saddr:meta mark",
+        "add rule ip t post tcp dport 10 snat to tcp dport:80",
+        "add rule ip t post tcp dport 11 snat to ip6 saddr:tcp sport",
+        "add rule ip t post tcp dport 12 snat to ip saddr:ip saddr",
+        "add rule ip t post tcp dport 13 snat to ip saddr:udp sport",
+        "add rule ip t post udp dport 14 snat to ip saddr:udp sport",
+        "add rule ip t post tcp dport 15 masquerade to ip saddr:tcp sport",
+        "add rule ip t pre tcp dport 16 dnat to ip daddr:tcp dport",
+        "add rule ip t pre dnat to ip saddr:tcp dport",
+        "add rule ip t pre udp dport 17 dnat to ip saddr:tcp dport",
+        "add rule inet i pre tcp dport 18 dnat ip to ip saddr:tcp dport",
+        "add rule inet i pre dnat ip to ip saddr:udp dport",
+        "add rule inet i pre dnat ip6 to ip6 saddr:udp dport",
+        "add rule inet i pre dnat ip6 to ip saddr:udp dport",
+    ]);
+}
+
+#[test]
+fn redirect_takes_no_address_expression() {
+    compare_in_tables(&[
+        "add rule ip t pre redirect to 80-90:5",
+        "add rule ip t pre tcp dport 1 redirect to 80-90:5",
+        "add rule ip t pre tcp dport 2 redirect to 80-90",
+        "add rule ip t pre tcp dport 3 redirect to ip saddr:80",
+        "add rule ip t pre tcp dport 4 redirect to ip saddr:tcp dport",
+        "add rule ip t pre tcp dport 5 redirect to ip daddr:80",
+        "add rule ip t pre tcp dport 6 redirect to tcp sport:80",
+        "add rule ip t pre tcp dport 7 redirect to ip saddr:",
+        "add rule ip t pre tcp dport 8 redirect to ip saddr",
+        "add rule ip t pre tcp dport 9 redirect to 80:",
+        "add rule ip t pre tcp dport 10 redirect to 80:90",
+        "add rule ip t pre tcp dport 11 redirect to ab:80",
+        "add rule ip t pre tcp dport 12 redirect to g:80",
+        "add rule ip t pre tcp dport 13 redirect to xyz:80",
+        "add rule ip t pre tcp dport 14 redirect to :80-90",
+    ]);
+}
+
+#[test]
+fn hyphenated_names_are_no_ranges() {
+    compare_in_tables(&[
+        "add rule ip t f meta l4proto tcp-udp accept",
+        "add rule ip t f meta l4proto { tcp-udp } accept",
+        "add rule ip t f meta l4proto vmap { tcp-udp : accept }",
+        "add rule ip t f meta l4proto foo accept",
+        "add rule ip t f ip protocol tcp-udp accept",
+        "add rule ip t f ip protocol tcp-17 accept",
+        "add rule ip t f ip protocol 6-udp accept",
+        "add rule ip t f ip protocol { icmp-tcp } accept",
+        "add rule ip t f ip protocol { 1-tcp } accept",
+        "add rule ip6 s f ip6 nexthdr tcp-udp accept",
+        "add rule ip t f tcp dport http-https accept",
+        "add rule ip t f tcp dport { http-https } accept",
+        "add rule ip t f tcp dport http-443 accept",
+        "add rule ip t f tcp dport 80-https accept",
+        "add rule ip t f tcp dport { 80-https } accept",
+        "add rule ip t f tcp dport 22-ssh accept",
+        "add rule ip t f tcp dport ssh-22 accept",
+        "add rule ip t f tcp dport 80-443 accept",
+        "add rule ip t f tcp dport { http - https } accept",
+        "add rule ip t f meta l4proto { tcp - udp } accept",
+        "add rule ip t f ip saddr 1.1.1.1-1.1.1.5 accept",
+        "add rule ip t f iifname eth0-eth1 accept",
+    ]);
+}
+
+#[test]
+fn icmpv6_and_icmp_in_ip_and_ip6_tables() {
+    compare_in_tables(&[
+        "add rule ip t f icmpv6 type echo-request accept",
+        "add rule ip t f icmpv6 type nd-neighbor-solicit accept",
+        "add rule ip t f icmpv6 code 1 accept",
+        "add rule ip t f icmpv6 type { echo-request, nd-router-advert } accept",
+        "add rule ip t f ip protocol icmpv6 icmpv6 type echo-request accept",
+        "add rule ip t f ip saddr 1.1.1.1 icmpv6 type echo-request accept",
+        "add rule ip t f ip6 saddr ::1 icmpv6 type echo-request accept",
+        "add rule ip t f icmpv6 type echo-request tcp dport 1 accept",
+        "add rule ip t f ip protocol icmp icmpv6 type echo-request accept",
+        "add rule ip6 s f icmp type echo-request accept",
+        "add rule ip6 s f icmpv6 type echo-request accept",
+        "add rule ip6 s f ip saddr 1.1.1.1 icmp type echo-request accept",
+        "add rule inet i f icmpv6 type echo-request accept",
+        "add rule inet i f icmp type echo-request accept",
+    ]);
+}
+
+const NETDEV_TABLES: &[&str] = &[
+    "add table netdev n",
+    "add chain netdev n c { type filter hook ingress device d0 priority 0; }",
+    "add table bridge b",
+    "add chain bridge b c { type filter hook prerouting priority 0; }",
+    "add table arp a",
+    "add chain arp a c { type filter hook input priority 0; }",
+    "add table ip t",
+    "add chain ip t f { type filter hook input priority 0; }",
+    "add table ip6 s",
+    "add chain ip6 s c { type filter hook input priority 0; }",
+    "add table inet i",
+    "add chain inet i c { type filter hook input priority 0; }",
+];
+
+#[test]
+fn fwd_statement() {
+    let cases = [
+        "add rule netdev n c fwd to d0",
+        "add rule netdev n c fwd to eth0",
+        "add rule netdev n c fwd to nosuch",
+        "add rule netdev n c fwd to 1.2.3.4",
+        "add rule netdev n c fwd to iif",
+        "add rule netdev n c fwd to meta mark",
+        "add rule netdev n c fwd to ct mark",
+        "add rule netdev n c fwd to ip saddr",
+        "add rule netdev n c fwd to tcp dport",
+        "add rule netdev n c fwd ip to 1.2.3.4 device d0",
+        "add rule netdev n c fwd ip6 to ::1 device d0",
+        "add rule netdev n c fwd ip to ip saddr device d0",
+        "add rule netdev n c fwd ip6 to ip6 daddr device eth0",
+        "add rule netdev n c fwd ip to 1.2.3.4 device meta iif",
+        "add rule netdev n c fwd ip to 1.2.3.4 device meta mark",
+        "add rule netdev n c fwd ip to 1.2.3.4 device nosuch",
+        "add rule netdev n c fwd ip to 1.2.3.4",
+        "add rule netdev n c fwd ip to device d0",
+        "add rule netdev n c fwd to ip saddr device d0",
+        "add rule netdev n c fwd",
+        "add rule netdev n c fwd ip",
+        "add rule netdev n c fwd device d0",
+        "add rule netdev n c fwd to d0 counter",
+        "add rule netdev n c fwd to d0 accept",
+        "add rule netdev n c fwd to d0 fwd to d0",
+        "add rule netdev n c counter fwd to d0",
+        "add rule bridge b c fwd to d0",
+        "add rule bridge b c fwd ip to 1.2.3.4 device d0",
+        "add rule arp a c fwd to d0",
+        "add rule ip t f fwd ip6 to ::1 device d0",
+        "add rule ip6 s c fwd to d0",
+        "add rule inet i c fwd to d0",
+    ];
+    compare(&[NETDEV_TABLES, &cases, LISTINGS].concat(), &[]);
+}
+
+#[test]
+fn synproxy_numbers() {
+    compare_in_tables(&[
+        "add rule ip t f tcp dport 1 synproxy mss 1460 wscale 7",
+        "add rule ip t f tcp dport 2 synproxy mss foo wscale 7",
+        "add rule ip t f tcp dport 3 synproxy mss 1460 wscale foo",
+        "add rule ip t f tcp dport 4 synproxy mss 70000 wscale 7",
+        "add rule ip t f tcp dport 5 synproxy mss 0x10000 wscale 7",
+        "add rule ip t f tcp dport 6 synproxy mss 1460 wscale 70000",
+        "add rule ip t f tcp dport 7 synproxy mss 1460 wscale 300",
+        "add rule ip t f tcp dport 8 synproxy mss 1460 wscale 15",
+        "add rule ip t f tcp dport 9 synproxy mss",
+        "add rule ip t f tcp dport 10 synproxy mss 1460 wscale 7 timestamp sack-perm",
+    ]);
+}
+
+#[test]
+fn keywords_are_no_names() {
+    let mut cmds = vec![
+        "add table ip t".to_owned(),
+        "add chain ip t ok".to_owned(),
+    ];
+    for w in [
+        "fwd", "synproxy", "dup", "queue", "reject", "counter", "jump", "accept", "log", "ct",
+        "meta", "tcp", "ip", "ip6", "ether", "type", "flush", "exists", "ecn", "and", "or",
+        "xor", "not", "eq", "ne", "le", "ge", "lt", "gt", "lshift", "rshift",
+    ] {
+        cmds.push(format!("add chain ip t {w}"));
+    }
+    for w in [
+        "fwdx", "Fwd", "last", "ack", "syn", "filter", "input", "forward", "nat", "route", "to",
+        "in", "any", "new", "established", "verdict", "string", "ssh", "x-", "a:b", "a.b", "1.2.3.4",
+    ] {
+        cmds.push(format!("add chain ip t {w}"));
+    }
+    cmds.extend(
+        [
+            "add chain ip t \"fwd\"",
+            "add chain ip t 123",
+            "add chain ip t 0x10",
+            "add chain ip fwd c",
+            "add table ip fwd",
+            "add counter ip t fwd",
+            "add quota ip t fwd { over 1 mbytes }",
+            "add element ip t fwd { 1.1.1.1 }",
+            "add rule ip t fwd accept",
+            "insert rule ip t fwd accept",
+            "add rule ip t ok jump fwd",
+            "add rule ip t ok goto fwd",
+            "delete chain ip t fwd",
+            "delete set ip t fwd",
+            "flush chain ip t fwd",
+            "list chain ip t fwd",
+            "list set ip t fwd",
+            "rename chain ip t ok fwd",
+            "rename chain ip t fwd ok",
+            "list ruleset",
+        ]
+        .map(str::to_owned),
+    );
+    let cmds: Vec<&str> = cmds.iter().map(String::as_str).collect();
+    compare(&cmds, &[]);
+    let script = |name: &str| format!("table ip t {{\n\tchain {name} {{\n\t}}\n}}\n");
+    compare(
+        &["-f a.nft", "-f b.nft", "-f c.nft", "list ruleset"],
+        &[
+            ("a.nft", &script("fwd")),
+            ("b.nft", &script("jumpx")),
+            ("c.nft", &script("counter")),
+        ],
+    );
+}
+
+const QUERY_TABLES: &str = "table ip qs {
+	set s {
+		type ipv4_addr
+		flags interval
+		elements = { 10.0.0.1, 10.1.0.0/24 }
+	}
+	map m {
+		type ipv4_addr : verdict
+		elements = { 10.0.0.2 : drop, 10.0.0.3 : jump c }
+	}
+	map m2 {
+		type ipv4_addr : ipv4_addr
+		elements = { 10.0.0.2 : 1.1.1.1 }
+	}
+	map m3 {
+		type ipv4_addr . inet_service : ipv4_addr . inet_service
+		elements = { 10.0.0.2 . 80 : 1.1.1.1 . 90 }
+	}
+	map m5 {
+		type ipv4_addr : ipv4_addr
+		flags interval
+		elements = { 10.0.0.0/24 : 2.2.2.2, 10.1.0.0-10.1.0.9 : 3.3.3.3 }
+	}
+	map m8 {
+		type ipv4_addr : verdict
+		counter
+		elements = { 10.0.0.2 : drop }
+	}
+	set p {
+		type ipv4_addr
+		elements = { 10.0.0.9 }
+	}
+	chain c {
+	}
+}
+";
+
+#[test]
+fn get_element_of_a_map() {
+    compare(
+        &[
+            "-f tables.nft",
+            "get element ip qs m { 10.0.0.2 }",
+            "get element ip qs m { 10.0.0.3 }",
+            "get element ip qs m { 10.0.0.2, 10.0.0.3 }",
+            "get element ip qs m { 10.0.0.9 }",
+            "get element ip qs m2 { 10.0.0.2 }",
+            "get element ip qs m3 { 10.0.0.2 . 80 }",
+            "get element ip qs m3 { 10.0.0.2 . 81 }",
+            "get element ip qs m5 { 10.0.0.5 }",
+            "get element ip qs m5 { 10.1.0.5 }",
+            "get element ip qs m5 { 10.0.0.5, 10.1.0.5 }",
+            "get element ip qs m5 { 10.0.0.0/24 }",
+            "get element ip qs m8 { 10.0.0.2 }",
+            "get element ip qs m { 10.0.0.2 : drop }",
+            "get element ip qs m { 10.0.0.2 : accept }",
+            "-j get element ip qs m { 10.0.0.2 }",
+            "-s get element ip qs m2 { 10.0.0.2 }",
+            "reset element ip qs m { 10.0.0.2 }",
+            "reset element ip qs m8 { 10.0.0.2 }",
+            "get element ip qs s { 10.0.0.1, 10.1.0.5 }",
+            "get element ip qs p { 10.0.0.9, 10.0.0.9 }",
+        ],
+        &[("tables.nft", QUERY_TABLES)],
+    );
+}
+
+#[test]
+fn queries_of_elements_see_the_ruleset_before_the_input() {
+    let files = [
+        ("tables.nft", QUERY_TABLES),
+        ("g1.nft", "add element ip qs s { 10.7.0.1 }\nget element ip qs s { 10.7.0.1 }\n"),
+        (
+            "g2.nft",
+            "add set ip qs s2 { type ipv4_addr; elements = { 10.7.0.1 }; }\nget element ip qs s2 { 10.7.0.1 }\n",
+        ),
+        (
+            "g3.nft",
+            "delete element ip qs p { 10.0.0.9 }\nget element ip qs p { 10.0.0.9 }\n",
+        ),
+        ("g4.nft", "flush set ip qs p\nget element ip qs p { 10.0.0.9 }\n"),
+        (
+            "g5.nft",
+            "get element ip qs p { 10.0.0.9 }\nadd element ip qs p { 10.7.0.1 }\n",
+        ),
+        (
+            "g6.nft",
+            "add element ip qs p { 10.7.0.1 }\nget element ip qs p { 10.0.0.9 }\n",
+        ),
+        (
+            "g7.nft",
+            "add element ip qs p { 10.7.0.1 }\nget element ip qs p { 10.0.0.9, 10.7.0.1 }\n",
+        ),
+        ("g8.nft", "delete table ip qs\nget element ip qs p { 10.0.0.9 }\n"),
+        (
+            "g9.nft",
+            "flush ruleset\ntable ip qs {\n\tset p {\n\t\ttype ipv4_addr\n\t\telements = { 10.0.0.9 }\n\t}\n}\nget element ip qs p { 10.0.0.9 }\n",
+        ),
+        (
+            "g10.nft",
+            "add element ip qs s { 10.8.0.0/24 }\nget element ip qs s { 10.8.0.5 }\n",
+        ),
+        (
+            "g11.nft",
+            "add element ip qs m { 10.7.0.1 : drop }\nget element ip qs m { 10.7.0.1 }\n",
+        ),
+        (
+            "g12.nft",
+            "delete element ip qs s { 10.0.0.1 }\nget element ip qs s { 10.0.0.1 }\n",
+        ),
+        (
+            "g13.nft",
+            "add table ip other\nadd set ip other o { type ipv4_addr; }\nadd element ip other o { 1.1.1.1 }\nget element ip other o { 1.1.1.1 }\n",
+        ),
+        (
+            "g14.nft",
+            "reset element ip qs p { 10.0.0.9 }\nadd element ip qs p { 10.7.0.1 }\nreset element ip qs p { 10.7.0.1 }\n",
+        ),
+        ("g15.nft", "add element ip qs p { 10.0.0.9 }\nget element ip qs p { 10.0.0.9 }\n"),
+    ];
+    let mut cmds = Vec::new();
+    for i in 1..=15 {
+        cmds.push("flush ruleset".to_owned());
+        cmds.push("-f tables.nft".to_owned());
+        cmds.push(format!("-f g{i}.nft"));
+        cmds.push("list ruleset".to_owned());
+    }
+    let cmds: Vec<&str> = cmds.iter().map(String::as_str).collect();
+    compare(&cmds, &files);
+}
+
+#[test]
+fn describe_of_a_word() {
+    compare(
+        &[
+            "describe nosuchthing",
+            "describe foo",
+            "describe 123",
+            "describe 0x10",
+            "describe \"foo\"",
+            "describe foo-bar",
+            "describe a.b",
+            "describe 1.2.3.4",
+            "describe ::1",
+            "describe ssh",
+            "describe established",
+            "describe foo bar",
+            "describe 1.2.3.4/24",
+            "describe 1-2",
+            "-j describe nosuchthing",
+            "describe tcp dport",
+            "describe meta mark",
+            "describe icmp type",
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn full_width_masks_are_not_listed() {
+    compare_in_tables(&[
+        "add rule ip t f ip saddr and 255.255.255.255 . udp dport and 0xfff0 vmap { 1.2.3.4 . 12320 : drop }",
+        "add rule ip t f ip saddr & 255.255.255.255 . udp dport & 0xfff0 vmap { 1.2.3.4 . 12320 : drop }",
+        "add rule ip t f ip saddr & 255.255.0.0 . udp dport & 0xfff0 vmap { 1.2.0.0 . 12320 : drop }",
+        "add rule ip t f ip saddr . udp dport & 0xffff vmap { 1.2.3.4 . 12320 : drop }",
+        "add rule ip t f ip saddr & 255.255.255.255 vmap { 1.2.3.4 : drop }",
+        "add rule ip t f ip saddr & 255.255.255.255 == 1.2.3.4 accept",
+        "add rule ip t f ip saddr & 255.255.255.255 . tcp dport { 1.2.3.4 . 80 } accept",
+        "add rule ip t f ip saddr . tcp dport & 0xffff { 1.2.3.4 . 80 } accept",
+        "add rule ip t f meta mark & 0xffffffff . tcp dport vmap { 1 . 80 : accept }",
+        "add rule ip t f ip saddr . ip daddr & 255.255.255.255 vmap { 1.2.3.4 . 5.6.7.8 : drop }",
+        "add rule ip6 s f ip6 saddr & ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff . tcp dport & 0xfff0 vmap { ::1 . 80 : drop }",
+        "add rule ip6 s f ip6 saddr & ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff . tcp dport vmap { ::1 . 80 : drop }",
+    ]);
+}
+
+#[test]
+fn synproxy_object_attributes_in_a_row() {
+    compare(
+        &["-f sp.nft", "list ruleset", "--debug=netlink list ruleset", "-j list ruleset"],
+        &[(
+            "sp.nft",
+            "table ip t {
+	synproxy sp1 { mss 1460 wscale 7 }
+	synproxy sp2 { mss 1460 wscale 7 timestamp sack-perm }
+	synproxy sp3 {
+		mss 1460
+		wscale 7
+		timestamp sack-perm
+	}
+	chain c {
+		type filter hook input priority 0; policy accept;
+		tcp dport 1 synproxy name sp1
+	}
+}
+",
+        )],
+    );
+}
