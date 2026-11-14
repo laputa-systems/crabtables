@@ -1738,12 +1738,15 @@ fn trace_lines(out: &str) -> Vec<String> {
 
 /// `monitor trace` prints traces like nft. The packets are sent by the
 /// kernel after the commands that cause them returned (TCP
-/// retransmissions of a closed socket, IPv6 neighbour discovery and MLD
+/// retransmissions of a closed socket and MLD
 /// after link up), while the monitor runs in the foreground.
 #[test]
 fn monitor_trace() {
     let setup = r#"
 ip link add v0 address 02:00:00:00:00:01 type veth peer name v1 address 02:00:00:00:00:02
+for dev in v0 v1; do
+  sysctl -qw net.ipv6.conf.$dev.accept_dad=0 net.ipv6.conf.$dev.dad_transmits=0 net.ipv6.conf.$dev.router_solicitations=0
+done
 sysctl -qw net.ipv4.tcp_timestamps=0
 nft -f - <<'NFT'
 table inet t {
