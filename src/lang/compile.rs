@@ -122,6 +122,9 @@ struct Ctx {
     transport: bool,
     ether: bool,
     vlan: bool,
+    /// The network protocol (`ethertype::IP` or `IP6`) that nft tracks for
+    /// the rule in inet and link layer families, and the match that set it.
+    net: Option<(u16, Span)>,
 }
 
 /// Where each kernel operation of the batch came from.
@@ -404,6 +407,8 @@ struct RuleC<'a> {
     /// Statement span for each expression.
     spans: Vec<Span>,
     cur_span: Span,
+    /// Length of the printed left hand side of the current match.
+    left_len: Option<usize>,
     /// Expressions inserted at the start of the rule (dependencies of
     /// later statements).
     prepended: usize,
@@ -1577,11 +1582,23 @@ impl Compiler {
             ctx: Ctx::default(),
             spans: Vec::new(),
             cur_span: r.span,
+            left_len: None,
             prepended: 0,
             hash_input: None,
         };
+        let mut terminal: Option<Option<Span>> = None;
         for (i, st) in r.stmts.iter().enumerate() {
             rc.cur_span = r.stmt_spans.get(i).copied().unwrap_or(r.span);
+            let loc = r.stmt_locs.get(i).copied();
+            if let Some(t) = terminal {
+                let mut e = Error::msg("Statement after terminal statement has no effect");
+                e.span = loc.or(Some(rc.cur_span));
+                e.related = t.map(Related::Span);
+                return Err(e);
+            }
+            if is_terminal(st) {
+                terminal = Some(loc);
+            }
             let before = rc.exprs.len();
             let pre = rc.prepended;
             rc.stmt(st).map_err(|e| e.with_span(rc.cur_span))?;
@@ -2421,6 +2438,17 @@ fn parse_keyval(c: &Comp, e: &Expr) -> Result<KeyVal> {
         Expr::Range(a, b) => {
             let lo = single(c, a)?;
             let hi = single(c, b)?;
+            let t = datatype::by_id(c.ty);
+            if t.kind != Kind::Str && lo.len() <= 16 && lo.len() == hi.len() {
+                let order = if c.be { Order::Big } else { Order::Host };
+                if datatype::to_u128(&lo, order) > datatype::to_u128(&hi, order) {
+                    let text = |e: &Expr| raw_text(e).unwrap_or_default().to_owned();
+                    return Err(Error::about(
+                        "Range negative size",
+                        format!("{} - {}", text(a), text(b)),
+                    ));
+                }
+            }
             Ok(KeyVal::Range(lo, hi))
         }
         Expr::Prefix(a, n) => {
@@ -2429,8 +2457,38 @@ fn parse_keyval(c: &Comp, e: &Expr) -> Result<KeyVal> {
         }
         Expr::Value(Value::Raw(text)) => parse_text(c, text),
         Expr::Value(Value::Typed { bytes, .. }) => Ok(KeyVal::Single(to_reg(c, bytes.clone()))),
+        Expr::Binop(op, a, b) if is_constant(e) => fold_binop(c, *op, a, b),
         _ => Err(Error::msg("unsupported value")),
     }
+}
+
+/// Whether `e` is a value or a bit operation on constants.
+fn is_constant(e: &Expr) -> bool {
+    match e {
+        Expr::Value(_) => true,
+        Expr::Binop(_, a, b) => is_constant(a) && is_constant(b),
+        _ => false,
+    }
+}
+
+/// nft evaluates a bit operation on constants to a constant.
+fn fold_binop(c: &Comp, op: BinOp, a: &Expr, b: &Expr) -> Result<KeyVal> {
+    let a = single(c, a)?;
+    let out = match op {
+        BinOp::And | BinOp::Or | BinOp::Xor => {
+            let b = single(c, b)?;
+            a.iter()
+                .zip(&b)
+                .map(|(x, y)| match op {
+                    BinOp::And => x & y,
+                    BinOp::Or => x | y,
+                    _ => x ^ y,
+                })
+                .collect()
+        }
+        BinOp::Lshift | BinOp::Rshift => return Err(Error::msg("unsupported value")),
+    };
+    Ok(KeyVal::Single(out))
 }
 
 fn single(c: &Comp, e: &Expr) -> Result<Vec<u8>> {
@@ -2746,6 +2804,21 @@ fn kverdict(v: &Verdict) -> Result<nft::Verdict> {
     })
 }
 
+/// Whether `e` is a constant port or port range of NAT.
+fn is_port_value(e: &Expr) -> bool {
+    matches!(e, Expr::Value(_) | Expr::Range(..) | Expr::Prefix(..))
+}
+
+/// Whether nft ends the rule's evaluation at `st`, so that a statement
+/// after it is an error.
+fn is_terminal(st: &Stmt) -> bool {
+    match st {
+        Stmt::Verdict(v) => !matches!(v, Verdict::Continue),
+        Stmt::Reject { .. } | Stmt::Queue { .. } | Stmt::Nat { .. } => true,
+        _ => false,
+    }
+}
+
 // ------------------------------------------------------------------ rule statements
 
 impl RuleC<'_> {
@@ -2796,6 +2869,60 @@ impl RuleC<'_> {
         self.meta_load(nft::MetaKey::NfProto, Reg::R1);
         self.cmp(Reg::R1, nft::CmpOp::Eq, vec![v]);
         self.ctx.l3 = Some(t);
+    }
+
+    /// Record `t` as the network protocol if none is known yet.
+    fn net_default(&mut self, t: u16) {
+        if self.ctx.net.is_none()
+            && matches!(self.family, Family::Inet | Family::Bridge | Family::Netdev)
+        {
+            self.ctx.net = Some((t, self.left_span()));
+        }
+    }
+
+    fn set_left(&mut self, e: &Expr) {
+        self.left_len =
+            Some(super::print::expr(e, self.family, &super::print::Opts::default()).len());
+    }
+
+    /// The location of the left hand side of the current match.
+    fn left_span(&self) -> Span {
+        let s = self.cur_span;
+        match self.left_len {
+            Some(n) if n <= s.end.saturating_sub(s.start) => Span {
+                start: s.start,
+                end: s.start + n,
+            },
+            _ => s,
+        }
+    }
+
+    /// Track the network protocol a header match of protocol `t` implies,
+    /// as nft does, and reject a different one.
+    fn net_dep(&mut self, t: u16) -> Result<()> {
+        let name = |t: u16| if t == ethertype::IP6 { "ip6" } else { "ip" };
+        let cur = match (self.ctx.net, self.family) {
+            (Some((c, _)), _) => Some(c),
+            (None, Family::Ipv4) => Some(ethertype::IP),
+            (None, Family::Ipv6) => Some(ethertype::IP6),
+            _ => None,
+        };
+        match cur {
+            Some(c) if c != t => {
+                let mut e = Error::msg(format!(
+                    "conflicting network layer protocols specified: {} vs. {}",
+                    name(c),
+                    name(t)
+                ));
+                e.span = Some(self.left_span());
+                Err(e)
+            }
+            None if matches!(self.family, Family::Inet | Family::Bridge | Family::Netdev) => {
+                self.ctx.net = Some((t, self.left_span()));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn dep_l3(&mut self, t: u16) -> Result<()> {
@@ -2860,7 +2987,10 @@ impl RuleC<'_> {
                     self.ctx.vlan = true;
                 }
             }
-            Layer::Network(t) => self.dep_l3(t)?,
+            Layer::Network(t) => {
+                self.net_dep(t)?;
+                self.dep_l3(t)?
+            }
             Layer::Transport(Some(n)) => {
                 self.ctx.transport = true;
                 if self.ctx.l4 == Some(n) {
@@ -2868,9 +2998,11 @@ impl RuleC<'_> {
                 }
                 match p.name {
                     "icmp" | "igmp" if !matches!(self.family, Family::Ipv4) => {
+                        self.net_default(ethertype::IP);
                         self.dep_l3(ethertype::IP)?;
                     }
                     "icmpv6" if !matches!(self.family, Family::Ipv6) => {
+                        self.net_default(ethertype::IP6);
                         self.dep_l3(ethertype::IP6)?;
                     }
                     _ => {}
@@ -2915,8 +3047,21 @@ impl RuleC<'_> {
         for k in elems.iter().filter_map(|e| e.key.as_ref()) {
             if let Ok(KeyVal::Single(v)) = parse_keyval(&comps[0], k) {
                 self.ctx.transport |= gives_transport(left, &v);
+                if matches!(left, Expr::Meta(m) if m == "nfproto") {
+                    match v.first() {
+                        Some(2) => self.ctx.net = Some((ethertype::IP, self.cur_span)),
+                        Some(10) => self.ctx.net = Some((ethertype::IP6, self.cur_span)),
+                        _ => {}
+                    }
+                }
             }
         }
+    }
+
+    /// A match on the network protocol itself.
+    fn explicit_net(&mut self, t: u16) {
+        self.ctx.l3 = Some(t);
+        self.ctx.net = Some((t, self.cur_span));
     }
 
     /// Record what an explicit match provides.
@@ -2925,13 +3070,17 @@ impl RuleC<'_> {
         self.ctx.transport |= gives_transport(left, data);
         match left {
             Expr::Meta(k) if k == "nfproto" => match b(0) {
-                2 => self.ctx.l3 = Some(ethertype::IP),
-                10 => self.ctx.l3 = Some(ethertype::IP6),
+                2 => self.explicit_net(ethertype::IP),
+                10 => self.explicit_net(ethertype::IP6),
                 _ => {}
             },
             Expr::Meta(k) if k == "l4proto" => self.ctx.l4 = Some(b(0)),
             Expr::Meta(k) if k == "protocol" => {
-                self.ctx.l3 = Some(u16::from_be_bytes([b(0), b(1)]))
+                let t = u16::from_be_bytes([b(0), b(1)]);
+                self.ctx.l3 = Some(t);
+                if self.is_l2() && (t == ethertype::IP || t == ethertype::IP6) {
+                    self.ctx.net = Some((t, self.cur_span));
+                }
             }
             Expr::Meta(k) if k == "iiftype" && c.len == 2 => {
                 if u16::from_ne_bytes([b(0), b(1)]) == 1 {
@@ -2944,7 +3093,12 @@ impl RuleC<'_> {
                         self.ctx.vlan = true;
                         self.ctx.ether = true;
                     }
-                    t => self.ctx.l3 = Some(t),
+                    t => {
+                        self.ctx.l3 = Some(t);
+                        if t == ethertype::IP || t == ethertype::IP6 {
+                            self.ctx.net = Some((t, self.cur_span));
+                        }
+                    }
                 },
                 ("ip", "protocol") | ("ip6", "nexthdr") => self.ctx.l4 = Some(b(0)),
                 _ => {}
@@ -2987,6 +3141,12 @@ impl RuleC<'_> {
             Expr::Meta(k) => {
                 let m =
                     proto::meta(k).ok_or_else(|| Error::msg(format!("unknown meta key {k}")))?;
+                if k == "nfproto" && self.family != Family::Inet {
+                    return Err(Error::about(
+                        "meta nfproto is only useful in the inet family",
+                        "meta nfproto",
+                    ));
+                }
                 self.meta_load(m.key, reg);
                 Ok(vec![meta_comp(m)])
             }
@@ -3694,7 +3854,10 @@ impl RuleC<'_> {
 
     fn stmt(&mut self, st: &Stmt) -> Result<()> {
         match st {
-            Stmt::Match { left, op, right } => self.match_stmt(left, *op, right),
+            Stmt::Match { left, op, right } => {
+                self.set_left(left);
+                self.match_stmt(left, *op, right)
+            }
             Stmt::Verdict(v) => {
                 let v = self.verdict(v)?;
                 self.push(kx::Immediate {
@@ -3704,6 +3867,7 @@ impl RuleC<'_> {
                 Ok(())
             }
             Stmt::Vmap { key, map } => {
+                self.set_left(key);
                 self.map_lookup(key, map, Some(Reg::VERDICT), None, 0)?;
                 Ok(())
             }
@@ -3839,6 +4003,25 @@ impl RuleC<'_> {
                     return Err(Error::msg(
                         "Transparent proxy support requires transport protocol match",
                     ));
+                }
+                if matches!(self.family, Family::Bridge | Family::Netdev) {
+                    return Err(Error::msg("tproxy is only supported for IPv4/IPv6/INET"));
+                }
+                if let (Family::Inet, Some((n, sp))) = (self.family, self.ctx.net) {
+                    let want = match family.as_deref() {
+                        Some("ip") => Some(ethertype::IP),
+                        Some("ip6") => Some(ethertype::IP6),
+                        _ => None,
+                    };
+                    if want != Some(n) {
+                        let mut e = Error::msg(format!(
+                            "conflicting protocols specified: {} vs. {}. You must specify ip or ip6 family in tproxy statement",
+                            if n == ethertype::IP6 { "ip6" } else { "ip" },
+                            family.as_deref().unwrap_or("unknown")
+                        ));
+                        e.related = Some(Related::Span(sp));
+                        return Err(e);
+                    }
                 }
                 match (self.family, family.as_deref()) {
                     (Family::Ipv4, Some("ip6")) | (Family::Ipv6, Some("ip")) => {
@@ -4033,6 +4216,7 @@ impl RuleC<'_> {
         let constant = match value {
             Expr::Value(_) | Expr::Range(..) | Expr::Prefix(..) | Expr::List(_) => true,
             Expr::Concat(parts) => parts.iter().all(|p| matches!(p, Expr::Value(_))),
+            Expr::Binop(..) => is_constant(value),
             _ => false,
         };
         if !constant {
@@ -4628,6 +4812,10 @@ impl RuleC<'_> {
         );
         let pc = Comp::of_type(id::INET_SERVICE, 2);
         let (mut amin, mut amax, mut pmin, mut pmax) = (None, None, None, None);
+        let dynamic_port = port.filter(|p| !is_port_value(p));
+        if let Some(p @ Expr::Payload { .. }) = dynamic_port {
+            self.need_all(p)?;
+        }
         if let Some(a) = addr {
             match a {
                 Expr::Map(_, set) => {
@@ -4647,6 +4835,15 @@ impl RuleC<'_> {
                     })?;
                     amin = Some(Reg::R1);
                     if comps.len() == 2 && port.is_none() {
+                        if !self.ctx.transport {
+                            let mut e = Error::about(
+                                "transport protocol mapping is only valid after transport protocol match",
+                                super::print::expr(a, self.family, &super::print::Opts::default()),
+                            );
+                            e.needle_last = true;
+                            e.related = Some(Related::Word);
+                            return Err(e);
+                        }
                         pmin = Some(reg_at(ac.padded() / 4));
                     }
                 }
@@ -4675,9 +4872,27 @@ impl RuleC<'_> {
         }
         if let Some(p) = port {
             let parsed = match p {
-                Expr::Map(..) => None,
+                _ if dynamic_port.is_some() => None,
                 _ => Some(parse_keyval(&pc, p)?),
             };
+            // Port registers follow the address registers.
+            let n = u32::from(amin.is_some()) + u32::from(amax.is_some());
+            if dynamic_port.is_some() {
+                let comps = self.load(p, n * 4, Some(&[pc]))?;
+                if !matches!(p, Expr::Map(..)) && !key_compatible(&[pc], &comps) {
+                    let mut e = Error::about(
+                        format!(
+                            "datatype mismatch: expected {}, expression has type {}",
+                            key_desc(&[pc]),
+                            key_desc(&comps)
+                        ),
+                        super::print::expr(p, self.family, &super::print::Opts::default()),
+                    );
+                    e.needle_last = true;
+                    e.related = Some(Related::Word);
+                    return Err(e);
+                }
+            }
             if !self.ctx.transport {
                 let mut e = Error::about(
                     "transport protocol mapping is only valid after transport protocol match",
@@ -4687,12 +4902,9 @@ impl RuleC<'_> {
                 e.related = Some(Related::Word);
                 return Err(e);
             }
-            // Port registers follow the address registers.
-            let n = u32::from(amin.is_some()) + u32::from(amax.is_some());
             let (r1, r2) = (reg_at(n * 4), reg_at(n * 4 + 4));
             match parsed {
                 None => {
-                    self.load(p, n * 4, Some(&[pc]))?;
                     pmin = Some(r1);
                 }
                 Some(v) => match v {

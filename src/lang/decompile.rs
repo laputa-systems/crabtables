@@ -3037,6 +3037,7 @@ fn rule(env: &Env<'_>, r: &nft::Rule) -> Rule {
     Rule {
         span: Span::default(),
         stmt_spans: Vec::new(),
+        stmt_locs: Vec::new(),
         stmts: d.stmts.into_iter().flatten().collect(),
         comment: r.comment().map(str::to_owned),
         handle: r.handle,

@@ -2276,3 +2276,291 @@ fn nat_ports_need_transport_match() {
         &[],
     );
 }
+
+const NAT_TABLES: &[&str] = &[
+    "add table ip t",
+    "add chain ip t pre { type nat hook prerouting priority dstnat; }",
+    "add chain ip t post { type nat hook postrouting priority srcnat; }",
+    "add chain ip t mg { type filter hook prerouting priority mangle; }",
+    "add chain ip t f { type filter hook input priority 0; }",
+    "add table inet i",
+    "add chain inet i pre { type nat hook prerouting priority dstnat; }",
+    "add chain inet i mg { type filter hook prerouting priority mangle; }",
+    "add chain inet i f { type filter hook input priority 0; }",
+    "add table ip6 s",
+    "add chain ip6 s f { type filter hook input priority 0; }",
+    "add table bridge b",
+    "add chain bridge b c { type filter hook prerouting priority 0; }",
+    "add table arp a",
+    "add chain arp a c { type filter hook input priority 0; }",
+];
+
+const LISTINGS: &[&str] = &[
+    "list ruleset",
+    "--debug=netlink list ruleset",
+    "-s list ruleset",
+    "-j list ruleset",
+];
+
+fn compare_in_tables(cases: &[&str]) {
+    compare(&[NAT_TABLES, cases, LISTINGS].concat(), &[]);
+}
+
+#[test]
+fn redirect_takes_a_port_only() {
+    compare_in_tables(&[
+        "add rule ip t pre redirect to 1.2.3.4:80",
+        "add rule ip t pre tcp dport 1 redirect to 1.2.3.4:80",
+        "add rule ip t pre tcp dport 2 redirect to 1.2.3.4:80 random",
+        "add rule ip t pre tcp dport 3 redirect to [::1]:80",
+        "add rule ip t pre tcp dport 4 redirect to 80:90",
+        "add rule ip t pre tcp dport 5 redirect to a.b:80",
+        "add rule inet i pre tcp dport 1 redirect to 1.2.3.4:80",
+        "add rule ip t pre tcp dport 6 redirect to 1.2.3.4",
+        "add rule ip t pre tcp dport 7 redirect to :80",
+        "add rule ip t pre tcp dport 8 redirect to 80",
+        "add rule ip t pre tcp dport 9 redirect to :80-90 random",
+    ]);
+}
+
+#[test]
+fn nat_map_with_port_needs_transport_match() {
+    compare_in_tables(&[
+        "add rule ip t pre dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre dnat ip to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80-90 }",
+        "add rule ip t pre ip saddr 1.1.1.1 dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t post snat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule inet i pre dnat ip to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule inet i pre dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre tcp dport 1 dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre meta l4proto tcp dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre meta l4proto { tcp, udp } dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre dnat to ip saddr . tcp dport map { 1.1.1.1 . 1 : 1.2.3.4 . 80 }",
+        "add rule ip t pre dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 }",
+        "add rule ip t post tcp dport 2 snat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+        "add rule inet i pre tcp dport 2 dnat ip to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }",
+    ]);
+}
+
+#[test]
+fn nat_port_from_a_header_field() {
+    compare_in_tables(&[
+        "add rule ip t pre dnat to :tcp dport",
+        "add rule ip t pre tcp dport 1 dnat to :tcp dport",
+        "add rule ip t pre tcp dport 2 redirect to :tcp dport",
+        "add rule ip t pre dnat to 1.2.3.4:tcp dport",
+        "add rule ip t pre tcp dport 3 dnat to 1.2.3.4:tcp sport",
+        "add rule ip t pre tcp dport 4 dnat to 1.2.3.4:th dport",
+        "add rule ip t pre tcp dport 5 dnat to 1.2.3.4:tcp dport random",
+        "add rule ip t pre ip protocol tcp dnat to :tcp dport",
+        "add rule ip t pre udp dport 6 dnat to 1.2.3.4:udp dport",
+        "add rule ip t post tcp dport 7 masquerade to :tcp dport",
+        "add rule ip t post tcp dport 8 snat to 1.2.3.4:tcp sport",
+        "add rule ip t mg tcp dport 9 tproxy to :tcp dport",
+        "add rule ip t mg tcp dport 10 tproxy ip to 1.2.3.4:tcp sport",
+        "add rule inet i pre tcp dport 11 dnat ip to 1.2.3.4:tcp dport",
+        "add rule inet i pre tcp dport 12 dnat to :tcp dport",
+        "add rule ip t pre tcp dport 13 dnat to 1.2.3.4:meta mark",
+        "add rule ip t pre tcp dport 14 dnat to 1.2.3.4:ip saddr",
+        "add rule ip t pre tcp dport 15 dnat to 1.2.3.4:ct mark",
+    ]);
+}
+
+#[test]
+fn inet_tproxy_conflicting_protocols() {
+    compare_in_tables(&[
+        "add rule inet i mg ip saddr 1.1.1.1 tcp dport 1 tproxy to :80",
+        "add rule inet i mg ip saddr 1.1.1.1 meta l4proto tcp tproxy to :80",
+        "add rule inet i mg meta nfproto ipv4 meta l4proto tcp tproxy to :80",
+        "add rule inet i mg meta nfproto ipv4 tcp dport 1 tproxy to :80",
+        "add rule inet i mg meta nfproto ipv6 tcp dport 1 tproxy to :80",
+        "add rule inet i mg ip6 saddr ::1 tcp dport 1 tproxy to :80",
+        "add rule inet i mg ip saddr 1.1.1.1 tcp dport 1 tproxy ip to :80",
+        "add rule inet i mg ip saddr 1.1.1.1 tcp dport 1 tproxy ip6 to :80",
+        "add rule inet i mg ip saddr 1.1.1.1 tcp dport 1 tproxy to 1.2.3.4:80",
+        "add rule inet i mg meta nfproto ipv4 tcp dport 1 tproxy ip to :80",
+        "add rule inet i mg meta nfproto ipv4 tcp dport 1 tproxy ip6 to :80",
+        "add rule inet i mg meta nfproto ipv4 meta nfproto ipv6 tcp dport 1 tproxy to :80",
+        "add rule inet i mg meta nfproto { ipv4, ipv6 } tcp dport 1 tproxy to :80",
+        "add rule inet i mg meta nfproto != ipv4 tcp dport 1 tproxy to :80",
+        "add rule inet i mg ip protocol tcp tproxy to :80",
+        "add rule inet i mg ip6 nexthdr tcp tproxy ip to :80",
+        "add rule inet i mg ip6 nexthdr tcp tproxy ip6 to :80",
+        "add rule inet i mg tcp dport 1 ip saddr 1.1.1.1 tproxy to :80",
+        "add rule inet i mg tcp dport 1 meta nfproto ipv4 tproxy to :80",
+        "add rule inet i mg icmp type echo-request tproxy to :80",
+        "add rule inet i mg icmpv6 type echo-request tproxy to :80",
+        "add rule inet i mg ether type ip tcp dport 1 tproxy to :80",
+        "add rule inet i mg meta protocol ip tcp dport 1 tproxy to :80",
+        "add rule inet i mg ip saddr 1.1.1.1 tcp dport 1 counter tproxy to :80",
+        "add rule inet i mg ip6 saddr ::1 tcp dport 1 tproxy ip6 to [::1]:80",
+        "add rule inet i mg ip6 saddr ::1 tcp dport 1 tproxy ip to 1.1.1.1",
+        "add rule inet i mg tcp dport 1 tproxy to :80",
+        "add rule bridge b c tcp dport 1 tproxy to :80",
+        "add rule bridge b c ip saddr 1.1.1.1 tcp dport 1 tproxy ip to :80",
+        "add rule ip t mg tcp dport 2 tproxy ip to [::1]:80",
+        "add rule ip t mg tcp dport 3 tproxy ip to [::1]",
+        "add rule inet i mg tcp dport 4 tproxy ip6 to 1.2.3.4:80",
+        "add rule inet i mg tcp dport 5 tproxy ip6 to ::1",
+    ]);
+}
+
+#[test]
+fn conflicting_network_layer_protocols() {
+    compare_in_tables(&[
+        "add rule inet i f ip saddr 1.1.1.1 ip6 saddr ::1 accept",
+        "add rule inet i f ip6 saddr ::1 ip saddr 1.1.1.1 accept",
+        "add rule inet i f ip saddr 1.1.1.1 ip daddr 1.1.1.2 accept",
+        "add rule inet i f meta nfproto ipv4 ip6 saddr ::1 accept",
+        "add rule inet i f meta nfproto ipv6 ip saddr 1.1.1.1 accept",
+        "add rule inet i f meta nfproto ipv4 ip saddr 1.1.1.1 accept",
+        "add rule inet i f icmp type echo-request ip6 saddr ::1 accept",
+        "add rule inet i f ip saddr 1.1.1.1 meta nfproto ipv6 accept",
+        "add rule bridge b c ip saddr 1.1.1.1 ip6 saddr ::1 accept",
+        "add rule bridge b c meta protocol ip ip6 saddr ::1 accept",
+        "add rule ip t f ip6 saddr ::1 accept",
+        "add rule ip6 s f ip saddr 1.1.1.1 accept",
+    ]);
+}
+
+#[test]
+fn meta_nfproto_is_inet_only() {
+    compare_in_tables(&[
+        "add rule ip t f meta nfproto ipv4 accept",
+        "add rule ip t f meta nfproto ipv6 accept",
+        "add rule ip t f meta nfproto { ipv4, ipv6 } accept",
+        "add rule ip t f meta nfproto != ipv4 accept",
+        "add rule ip t f meta nfproto 2 accept",
+        "add rule ip t f meta nfproto vmap { ipv4 : accept, ipv6 : drop }",
+        "add rule ip t f ip saddr 1.1.1.1 meta nfproto ipv4 accept",
+        "add rule ip t f meta nfproto ipv4 counter accept",
+        "add rule ip t mg meta nfproto ipv4 tcp dport 1 tproxy to :80",
+        "add rule ip6 s f meta nfproto ipv6 accept",
+        "add rule ip6 s f meta nfproto != ipv6 accept",
+        "add rule bridge b c meta nfproto ipv4 accept",
+        "add rule arp a c meta nfproto ipv4 accept",
+        "add rule inet i f meta nfproto ipv4 accept",
+        "add rule inet i f meta nfproto { ipv4, ipv6 } accept",
+        "add rule inet i f meta nfproto vmap { ipv4 : accept, ipv6 : drop }",
+        "add rule inet i f ip saddr 1.1.1.1 accept",
+    ]);
+}
+
+#[test]
+fn statements_after_terminal_statements() {
+    compare_in_tables(&[
+        "add rule ip t f accept counter",
+        "add rule ip t f drop counter",
+        "add rule ip t f continue counter",
+        "add rule ip t f return counter",
+        "add rule ip t f jump pre counter",
+        "add rule ip t f goto pre counter",
+        "add rule ip t f reject counter",
+        "add rule ip t f reject with tcp reset counter",
+        "add rule ip t f queue counter",
+        "add rule ip t f queue num 1 counter",
+        "add rule ip t f accept accept",
+        "add rule ip t f accept drop",
+        "add rule ip t f drop log",
+        "add rule ip t f counter accept counter",
+        "add rule ip t f reject drop",
+        "add rule ip t f queue accept",
+        "add rule ip t f ct state new accept ct state new",
+        "add rule ip t f accept tcp dport foobar",
+        "add rule ip t f accept ip saddr 1.2.3.999",
+        "add rule ip t f accept jump nosuch",
+        "add rule ip t f accept comment \"x\"",
+        "add rule ip t pre tcp dport 1 dnat to 1.2.3.4:80 counter",
+        "add rule ip t pre tcp dport 2 redirect to :80 counter",
+        "add rule ip t pre tcp dport 3 dnat to 1.2.3.4:80 accept",
+        "add rule ip t pre tcp dport 4 redirect to :80 accept",
+        "add rule ip t pre masquerade accept",
+        "add rule ip t pre snat to 1.2.3.4 accept",
+        "add rule ip t pre tcp dport 5 dnat to 1.2.3.4:80 dnat to 1.2.3.5:80",
+        "add rule ip t pre dnat to 1.2.3.4:80 counter",
+        "add rule ip t pre dnat to 1.2.3.4 tcp dport foobar",
+        "add rule ip t pre dnat to 1.2.3.4 tcp dport 2",
+        "add rule ip t pre dnat to 1.2.3.4 foo",
+        "add rule ip t mg tcp dport 6 tproxy to :80 counter",
+        "add rule ip t mg tcp dport 7 tproxy to :80 accept",
+        "add rule ip t f notrack counter",
+        "add rule ip t f ip saddr vmap { 1.1.1.1 : accept } counter",
+        "add rule ip t f meta mark set 1 counter",
+        "add rule ip t f dup to 1.2.3.4 counter",
+    ]);
+}
+
+#[test]
+fn bit_operations_on_constants() {
+    compare_in_tables(&[
+        "add rule ip t f tcp option mss exists accept",
+        "add rule ip t f tcp option mss size 1 accept",
+        "add rule ip t f tcp option maxseg size 2 accept",
+        "add rule ip t f tcp option mss accept",
+        "add rule ip t f tcp option mss",
+        "add rule ip t f tcp dport 1 | 2 accept",
+        "add rule ip t f tcp dport 4 | 8 | 16 accept",
+        "add rule ip t f tcp dport 7 & 3 accept",
+        "add rule ip t f tcp dport 5 ^ 3 accept",
+        "add rule ip t f tcp dport 1 | 2 == 3 accept",
+        "add rule ip t f meta mark 1 | 2 accept",
+        "add rule ip t f meta mark 0x1 | 0x2 accept",
+        "add rule ip t f meta mark != 1 | 2 accept",
+        "add rule ip t f meta mark set 1 | 2",
+        "add rule ip t f meta mark set 0x10 | 0x20",
+        "add rule ip t f ip dscp 1 | 2 accept",
+        "add rule ip t f ct mark 1 | 2 accept",
+        "add rule ip t f ct mark set 1 | 4",
+        "add rule ip t f tcp dport 1 | foo accept",
+        "add rule ip t f tcp flags syn | ack accept",
+        "add rule ip t f ip saddr 10.0.0.1 | 0.0.0.2 accept",
+    ]);
+}
+
+#[test]
+fn ranges_with_spaces() {
+    let script = |lines: &[&str]| {
+        let mut s =
+            String::from("table ip x {\n\tchain c {\n\t\ttype filter hook input priority 0;\n");
+        for l in lines {
+            s.push_str(&format!("\t\t{l}\n"));
+        }
+        s.push_str("\t}\n}\n");
+        s
+    };
+    let files = [
+        ("a.nft", script(&["meta l4proto { tcp - udp } accept"])),
+        (
+            "b.nft",
+            script(&["meta l4proto { tcp - udp, icmp } accept"]),
+        ),
+        ("c.nft", script(&["meta l4proto { 6 - 17 } accept"])),
+        ("d.nft", script(&["meta l4proto { tcp - 17 } accept"])),
+        ("e.nft", script(&["ip protocol { tcp - udp } accept"])),
+        ("f.nft", script(&["meta l4proto != { tcp - udp } accept"])),
+        (
+            "g.nft",
+            script(&["meta l4proto vmap { tcp - udp : accept }"]),
+        ),
+        ("h.nft", script(&["ip protocol { 6 - udp } accept"])),
+        ("i.nft", script(&["tcp dport { http - https } accept"])),
+        ("j.nft", script(&["tcp dport { 22 - 80, 443 } accept"])),
+        ("k.nft", script(&["ip saddr { 1.1.1.1 - 1.1.1.5 } accept"])),
+        ("l.nft", script(&["meta l4proto { udp - tcp } accept"])),
+        ("m.nft", script(&["tcp dport 22 - 80 accept"])),
+        ("n.nft", script(&["meta l4proto tcp - udp accept"])),
+        (
+            "o.nft",
+            script(&[
+                "meta l4proto { tcp - udp } accept",
+                "tcp dport 22 - 80 accept",
+            ]),
+        ),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(n, s)| (*n, s.as_str())).collect();
+    let mut cmds: Vec<String> = files.iter().map(|(n, _)| format!("-f {n}")).collect();
+    cmds.extend(LISTINGS.iter().map(|s| s.to_string()));
+    let cmds: Vec<&str> = cmds.iter().map(String::as_str).collect();
+    compare(&cmds, &files);
+}

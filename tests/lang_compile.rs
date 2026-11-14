@@ -481,3 +481,82 @@ table ip6 t6 {
 ",
     );
 }
+
+#[test]
+fn nat_ports_from_fields_and_maps() {
+    check(
+        "table ip t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat to :tcp dport
+    dnat to 1.2.3.4:tcp dport
+    tcp dport 1 dnat to :tcp dport
+    tcp dport 2 redirect to :tcp dport
+    tcp dport 3 dnat to 1.2.3.4:tcp sport
+    tcp dport 4 dnat to 1.2.3.4:th dport random
+    ip protocol tcp dnat to :tcp dport
+    udp dport 5 dnat to 1.2.3.4:udp dport
+    tcp dport 6 dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }
+    meta l4proto { tcp, udp } dnat to ip saddr map { 1.1.1.1 : 1.2.3.4 . 80 }
+    dnat to ip saddr . tcp dport map { 1.1.1.1 . 1 : 1.2.3.4 . 80 }
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    tcp dport 1 masquerade to :tcp dport
+    tcp dport 2 snat to 1.2.3.4:tcp sport
+  }
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    tcp dport 1 tproxy to :tcp dport
+    tcp dport 2 tproxy ip to 1.2.3.4:tcp sport
+  }
+}
+table inet i {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    tcp dport 1 dnat to :tcp dport
+    tcp dport 2 dnat ip to 1.2.3.4:tcp dport
+  }
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    ip saddr 1.1.1.1 tcp dport 1 tproxy ip to :80
+    meta nfproto ipv6 tcp dport 2 tproxy ip6 to [fd00::5]:80
+    meta nfproto != ipv4 tcp dport 3 tproxy to :80
+    ip6 nexthdr tcp tproxy ip6 to :80
+  }
+}
+",
+    );
+}
+
+#[test]
+fn constant_operations_and_spaced_ranges() {
+    check(
+        "table ip t {
+  chain c {
+    type filter hook input priority filter; policy accept;
+    tcp option mss exists accept
+    tcp option mss size 1460 accept
+    tcp dport 1 | 2 accept
+    tcp dport 4 | 8 | 16 accept
+    tcp dport 7 & 3 accept
+    tcp dport 5 ^ 3 accept
+    meta mark 1 | 2 accept
+    meta mark 0x10 | 0x20 accept
+    meta mark set 1 | 2
+    ct mark set 1 | 4
+    ip dscp 1 | 2 accept
+    meta l4proto { tcp - udp } accept
+    meta l4proto { 6 - 17 } accept
+    meta l4proto != { tcp - udp } accept
+    meta l4proto vmap { tcp - udp : accept }
+    ip protocol { tcp - udp } accept
+    tcp dport { http - https } accept
+    tcp dport { 22 - 80, 443 } accept
+    tcp dport 22 - 80 accept
+    ip saddr { 1.1.1.1 - 1.1.1.5 } accept
+  }
+}
+",
+    );
+}

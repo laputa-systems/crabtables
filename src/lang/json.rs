@@ -343,6 +343,7 @@ impl Out<'_> {
                 let o = Opts {
                     service: false,
                     reverse_dns: false,
+                    numeric_proto: true,
                     ..*self.o
                 };
                 let out = Out {
