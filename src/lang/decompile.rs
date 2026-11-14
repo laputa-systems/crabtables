@@ -656,10 +656,32 @@ fn set_flags(f: u32) -> Vec<String> {
     v
 }
 
+/// The components of the data of a map: several for concatenated data.
+fn data_comps(s: &nft::Set) -> Vec<Comp> {
+    let (_, one) = data_spec(s);
+    let types = split_type(s.data_type.unwrap_or(0));
+    if s.flags & NFT_SET_MAP == 0 || s.data_type == Some(NFT_DATA_VERDICT) || types.len() < 2 {
+        return one.into_iter().collect();
+    }
+    types
+        .iter()
+        .map(|t| {
+            let ty = datatype::by_id(*t);
+            Comp {
+                ty: *t,
+                bits: if ty.bits == 0 { 32 } else { ty.bits },
+                be: ty.order == Order::Big,
+                shift: 0,
+            }
+        })
+        .collect()
+}
+
 fn set(s: &nft::Set, elems: &[nft::SetElem]) -> Set {
     let ud = s.userdata.as_deref().unwrap_or(&[]);
     let (key, comps) = key_comps(s);
-    let (data, dcomp) = data_spec(s);
+    let data = data_spec(s).0;
+    let dcomps = data_comps(s);
     Set {
         span: Span::default(),
         name_span: Span::default(),
@@ -692,7 +714,7 @@ fn set(s: &nft::Set, elems: &[nft::SetElem]) -> Set {
                 st => st,
             })
             .collect(),
-        elements: Some(elements(s, elems, &comps, dcomp, false)),
+        elements: Some(elements(s, elems, &comps, &dcomps, false)),
     }
 }
 
@@ -837,7 +859,7 @@ fn decrement(v: &[u8]) -> Vec<u8> {
     out
 }
 
-fn elem_common(s: &nft::Set, e: &nft::SetElem, out: &mut Elem, dcomp: Option<Comp>) {
+fn elem_common(s: &nft::Set, e: &nft::SetElem, out: &mut Elem, dcomps: &[Comp]) {
     let set_timeout = s.timeout.map(|d| d.as_millis() as u64);
     out.timeout = e
         .timeout
@@ -848,7 +870,8 @@ fn elem_common(s: &nft::Set, e: &nft::SetElem, out: &mut Elem, dcomp: Option<Com
     out.stmts = e.exprs.iter().filter_map(simple_stmt).collect();
     out.data = match (&e.data, &e.objref) {
         (Some(Data::Verdict(v)), _) => Some(Expr::Verdict(verdict(v))),
-        (Some(Data::Value(v)), _) => dcomp.map(|c| {
+        (Some(Data::Value(v)), _) if dcomps.len() > 1 => Some(key_expr(v, dcomps)),
+        (Some(Data::Value(v)), _) => dcomps.first().copied().map(|c| {
             // Interval data: low and high values.
             let ud = s.userdata.as_deref().unwrap_or(&[]);
             let iv = nft::udata::iter(ud)
@@ -902,7 +925,7 @@ fn elements(
     s: &nft::Set,
     elems: &[nft::SetElem],
     comps: &[Comp],
-    dcomp: Option<Comp>,
+    dcomps: &[Comp],
     keep_order: bool,
 ) -> Vec<Elem> {
     let mut out = Vec::new();
@@ -921,7 +944,7 @@ fn elements(
             let e = ev[i];
             if e.is_catchall() {
                 let mut el = Elem::default();
-                elem_common(s, e, &mut el, dcomp);
+                elem_common(s, e, &mut el, dcomps);
                 out.push(el);
                 i += 1;
                 continue;
@@ -938,7 +961,7 @@ fn elements(
                 _ => vec![0xff; lo.len()],
             };
             let mut el = Elem::key(interval(comps[0], &lo, &hi));
-            elem_common(s, e, &mut el, dcomp);
+            elem_common(s, e, &mut el, dcomps);
             out.push(el);
             i += 1;
         }
@@ -967,7 +990,7 @@ fn elements(
                 None => key_expr(key, comps),
             });
         }
-        elem_common(s, e, &mut el, dcomp);
+        elem_common(s, e, &mut el, dcomps);
         out.push(el);
     }
     // Concatenated intervals are listed in the kernel's (insertion) order.
@@ -1500,8 +1523,8 @@ impl Dec<'_, '_> {
                         c.shift = p.shift;
                     }
                 }
-                let (_, dcomp) = data_spec(s);
-                Expr::Set(elements(s, elems, &comps, dcomp, self.env.keep_order))
+                let dcomps = data_comps(s);
+                Expr::Set(elements(s, elems, &comps, &dcomps, self.env.keep_order))
             }
             _ => Expr::SetRef(name.to_owned()),
         }
@@ -1719,6 +1742,13 @@ impl Dec<'_, '_> {
                     }
                     Some(d) => {
                         let (ty, bits, be) = self.regval_of_set_data(&l.set);
+                        let extra = self
+                            .lookup_set(&l.set)
+                            .and_then(|(s, _)| s.data_len)
+                            .map_or(0, |n| n.div_ceil(4).saturating_sub(1));
+                        for i in 1..=extra {
+                            self.regs.remove(&(word(d) + i));
+                        }
                         self.regs.insert(
                             word(d),
                             RegVal::expr(Expr::Map(Box::new(key), Box::new(set)), ty, bits, be),
@@ -2395,10 +2425,24 @@ impl Dec<'_, '_> {
             }
         });
         let port = self.ports(n.reg_proto_min, n.reg_proto_max);
+        // A map of addresses and ports names the family it was written with.
+        let pairs = match &addr {
+            Some(Expr::Map(_, set)) => match &**set {
+                Expr::Set(elems) => elems
+                    .iter()
+                    .any(|e| matches!(e.data, Some(Expr::Concat(_)))),
+                Expr::SetRef(name) => self
+                    .lookup_set(name)
+                    .is_some_and(|(s, _)| data_comps(s).len() > 1),
+                _ => false,
+            },
+            _ => false,
+        };
         let family = match self.family {
             Family::Inet | Family::Bridge | Family::Netdev if addr.is_some() => {
                 Some(if v6 { "ip6" } else { "ip" }.to_owned())
             }
+            _ if pairs => Some(if v6 { "ip6" } else { "ip" }.to_owned()),
             _ => None,
         };
         let kind = if n.ty == nft::NatType::Dnat {

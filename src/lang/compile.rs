@@ -1156,6 +1156,7 @@ impl Compiler {
             ud.data_interval = Some(s.data_interval);
             ud.data_typeof = Some(match d {
                 TypeSpec::Typeof(exprs) => Tyof::Exprs(exprs),
+                TypeSpec::Type(names) if names.len() > 1 => Tyof::TypedConcat,
                 _ => Tyof::Value,
             });
             match d {
@@ -4128,7 +4129,14 @@ impl RuleC<'_> {
             self.cmp(reg, cmp_op(op), v);
             return Ok(());
         }
-        match parse_keyval(&c, right)? {
+        let spelled_prefix = matches!(right, Expr::Prefix(..))
+            || raw_text(right).is_some_and(|s| s.contains('/'));
+        let value = match parse_keyval(&c, right)? {
+            // nft evaluates a range with equal bounds to its value.
+            KeyVal::Range(lo, hi) if lo == hi && !spelled_prefix => KeyVal::Single(lo),
+            v => v,
+        };
+        match value {
             KeyVal::Single(v) => {
                 let ordered = matches!(op, RelOp::Lt | RelOp::Gt | RelOp::Lte | RelOp::Gte);
                 let mut v = v;
@@ -4151,9 +4159,7 @@ impl RuleC<'_> {
                 Ok(())
             }
             KeyVal::Range(lo, hi) => {
-                let prefix = matches!(right, Expr::Prefix(..))
-                    || raw_text(right).is_some_and(|s| s.contains('/'));
-                if prefix && matches!(c.ty, id::IPADDR | id::IP6ADDR) && c.shift == 0 {
+                if spelled_prefix && matches!(c.ty, id::IPADDR | id::IP6ADDR) && c.shift == 0 {
                     return self.prefix_match(&c, op, lo, hi);
                 }
                 if !c.be {
@@ -4566,8 +4572,15 @@ impl RuleC<'_> {
         let (mut amin, mut amax, mut pmin, mut pmax) = (None, None, None, None);
         if let Some(a) = addr {
             match a {
-                Expr::Map(..) => {
-                    self.load(a, 0, Some(&[ac])).map_err(|mut e| {
+                Expr::Map(_, set) => {
+                    let pairs = match &**set {
+                        Expr::Set(elems) => elems
+                            .iter()
+                            .any(|e| matches!(e.data, Some(Expr::Concat(_)))),
+                        _ => false,
+                    };
+                    let hint = if pairs { vec![ac, pc] } else { vec![ac] };
+                    let comps = self.load(a, 0, Some(&hint)).map_err(|mut e| {
                         // nft reports a missing map here twice.
                         if e.msg.starts_with("No such file or directory") {
                             e.repeat = 2;
@@ -4575,6 +4588,9 @@ impl RuleC<'_> {
                         e
                     })?;
                     amin = Some(Reg::R1);
+                    if comps.len() == 2 && port.is_none() {
+                        pmin = Some(reg_at(ac.padded() / 4));
+                    }
                 }
                 _ => match parse_keyval(&ac, a)? {
                     KeyVal::Single(v) => {

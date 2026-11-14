@@ -143,14 +143,15 @@ Reference behavior the suite had to accommodate, recorded in the evidence:
 - Replacing a base-chain ruleset with `nft -f` (`flush ruleset` plus new tables) lets a few packets (0 to 3 of several thousand) of a flow both policies deny through while the hooks are swapped, on this kernel. The canary oracle therefore allows a budget of 32 packets; the injected non-atomic replacement leaks thousands.
 - Rejection diagnostics differ in text when the kernel refuses an operation (for example a `nat` chain on the forward hook) and nft words the error itself while `nfcrt` reports the kernel error. The suite compares the exit status and the presence of an `Error:` diagnostic, and keeps both texts raw.
 
-Known divergences kept as clearly marked fixtures (the case runs, must still diverge, and is reported `known_divergence`):
+One known divergence remains, kept as a clearly marked fixture (the case runs, must still diverge, and is reported `known_divergence`):
 
 | Id | Case | Difference |
 | --- | --- | --- |
-| CRAB-7-D1 | `nat.map.tcp.{v4,v6}` | `dnat to ip daddr . tcp dport map { ... }` is accepted by nft and rejected by `nfcrt` with `unsupported value`, so mapped DNAT does not happen |
-| CRAB-7-D2 | `expr.mark_range_single_value.{v4,v6}` | `meta mark 100-100` lists as `100` in nft and as `100-100` in `nfcrt`; packet behavior agrees |
-| CRAB-7-D3 | `cli.list_stdout_in_replacement.{v4,v6}` | a `list ruleset` that precedes later definitions in a replacement file prints a different listing (nft shows the table without its rules, `nfcrt` the rules of the new table); status, transaction and packet policy agree |
-| CRAB-7-D4 | `nat.listing.v6` | `nfcrt list ruleset` prints an IPv6 `dnat to [addr]:port` without the brackets, which is not reparsable; nft prints them |
+| CRAB-7-D3 | `cli.list_stdout_in_replacement.{v4,v6}` | a `list ruleset` that precedes later definitions in a replacement file prints a different listing |
+
+`nft` runs `list` after it has evaluated the whole file and before it sends the batch. It prints its local cache, which holds the kernel state at the start of the run with some commands already applied: `flush ruleset` and `delete table` remove entries, and `add table`, `add chain` and `add set` (with the elements written in the definition) of objects that do not yet exist add them. Rules, `add element` into an existing set, `flush chain`, and attribute changes to an existing chain (a new policy) are not applied. The fixture therefore shows the new table and chain without their rules. `nfcrt` runs queries after the commit, so that a query between mutations reports the state those mutations produced; it prints the rules of the new table. Matching `nft` would mean reproducing its cache model for every command, a state that exists in neither the old nor the new kernel ruleset, so the difference is intentional. Status, transaction outcome, and packet policy agree.
+
+The four divergences first recorded here are otherwise resolved: D1 (`dnat to ip daddr . tcp dport map { ... : addr . port }` is now compiled to nft's bytecode, with the port taken from the map data), D2 (a range with equal bounds is evaluated to its value, as `nft` does, which also changes the bytecode from `range eq lo lo` to `cmp eq lo`), and D4 (IPv6 NAT addresses followed by a port are listed in brackets, per bound of a range, and `tproxy` brackets every IPv6 address).
 
 ### Not yet covered
 
