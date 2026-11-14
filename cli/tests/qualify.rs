@@ -269,9 +269,7 @@ fn nat_map_case(f: Fam) -> Case {
         Want::at(Proto::Tcp, Bind::Srv(1), 81, rs, PeerPort::Same),
     );
     b.probe("map-miss", cl, Proto::Tcp, (Where::RouterC, 8082), Want::Refused);
-    let mut c = b.finish(format!("nat.map.tcp.{}", f.tag()), "nat");
-    c.known = Some("CRAB-7-D1: nfcrt rejects `dnat to <family> daddr . tcp dport map { ... }` (unsupported value); nft accepts it");
-    c
+    b.finish(format!("nat.map.tcp.{}", f.tag()), "nat")
 }
 
 fn nat_typed_text(f: Fam) -> String {
@@ -300,11 +298,7 @@ fn listing_case(f: Fam) -> Case {
         lister: true,
         ..Default::default()
     }));
-    let mut c = b.finish(format!("nat.listing.{}", f.tag()), "nat");
-    if f == Fam::V6 {
-        c.known = Some("CRAB-7-D4: nfcrt lists an IPv6 `dnat to [addr]:port` without the brackets (`dnat to fd00:2::2:80`), which is not reparsable; nft prints the brackets");
-    }
-    c
+    b.finish(format!("nat.listing.{}", f.tag()), "nat")
 }
 
 fn nat_typed_batch(f: Fam) -> Batch {
@@ -1334,7 +1328,7 @@ fn cli_cases(f: Fam) -> Vec<Case> {
         Policy2::B,
         false,
     );
-    d3.known = Some("CRAB-7-D3: `list ruleset` before later definitions in a replacement file prints a different listing (nft shows the pending table without its rules, nfcrt prints the rules of the new table)");
+    d3.known = Some("CRAB-7-D3: intentional. nft prints its evaluation cache for a `list ruleset` that precedes later definitions (the pending table without its rules); nfcrt runs queries after the commit and prints the new rules");
     out.push(d3);
     out
 }
@@ -1374,9 +1368,7 @@ fn single_mark_case(f: Fam) -> Case {
         counters: vec![("r0", 1)],
         ..Default::default()
     }));
-    let mut c = b.finish(format!("expr.mark_range_single_value.{}", f.tag()), "expressions");
-    c.known = Some("CRAB-7-D2: a range whose bounds are equal lists as `lo-lo` in nfcrt but as `lo` in nft (packet behavior agrees)");
-    c
+    b.finish(format!("expr.mark_range_single_value.{}", f.tag()), "expressions")
 }
 
 fn all_cases() -> Vec<Case> {

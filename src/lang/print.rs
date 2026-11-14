@@ -477,12 +477,11 @@ impl P<'_> {
                     s.push_str(" to ");
                 }
                 if let Some(a) = addr {
-                    let a6 = matches!(family.as_deref(), Some("ip6"));
-                    let txt = self.expr(a, Ctx::Plain);
+                    let a6 = self.v6_family(family.as_deref());
                     if a6 && port.is_some() && !matches!(a, Expr::Map(..)) {
-                        let _ = write!(s, "[{txt}]");
+                        s.push_str(&self.bracketed(a));
                     } else {
-                        s.push_str(&txt);
+                        s.push_str(&self.expr(a, Ctx::Plain));
                     }
                 }
                 if let Some(p) = port {
@@ -552,11 +551,10 @@ impl P<'_> {
                 }
                 s.push_str(" to ");
                 if let Some(a) = addr {
-                    let txt = self.expr(a, Ctx::Plain);
-                    if family.as_deref() == Some("ip6") && port.is_some() {
-                        let _ = write!(s, "[{txt}]");
+                    if self.v6_family(family.as_deref()) {
+                        s.push_str(&self.bracketed(a));
                     } else {
-                        s.push_str(&txt);
+                        s.push_str(&self.expr(a, Ctx::Plain));
                     }
                 }
                 if let Some(p) = port {
@@ -1020,6 +1018,27 @@ impl P<'_> {
     #[allow(dead_code)]
     fn family(&self) -> Family {
         self.family
+    }
+
+    /// Whether a NAT or tproxy address of qualifier `family` is IPv6.
+    fn v6_family(&self, family: Option<&str>) -> bool {
+        match family {
+            Some(f) => f == "ip6",
+            None => self.family == Family::Ipv6,
+        }
+    }
+
+    /// An IPv6 address (or each end of a range) in the brackets that
+    /// separate it from a port.
+    fn bracketed(&self, a: &Expr) -> String {
+        match a {
+            Expr::Range(lo, hi) => format!(
+                "[{}]-[{}]",
+                self.expr(lo, Ctx::Plain),
+                self.expr(hi, Ctx::Plain)
+            ),
+            a => format!("[{}]", self.expr(a, Ctx::Plain)),
+        }
     }
 }
 

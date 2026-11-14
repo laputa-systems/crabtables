@@ -265,6 +265,51 @@ fn listing() {
 }
 
 #[test]
+fn nat_map_ports_and_ip6_brackets() {
+    compare(
+        &[
+            "-f nat.nft",
+            "list ruleset",
+            "-j list ruleset",
+            "-s list ruleset",
+            "list chain ip6 q pre",
+        ],
+        &[(
+            "nat.nft",
+            "table ip6 q {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat to ip6 daddr . tcp dport map { fd00::1 . 8080 : fd00:2::2 . 80, fd00::1 . 8081 : fd00:2::3 . 81 }
+    tcp dport 1 dnat to [fd00:2::2]:80
+    tcp dport 2 dnat to [fd00:2::2]-[fd00:2::5]:80
+    dnat to [fd00:2::2]
+    tcp dport 3 redirect to :80
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    tcp dport 1 snat to [fd00:2::2]:80
+    tcp dport 2 masquerade to :80-90
+  }
+}
+table ip t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    udp dport 1 dnat to ip daddr . udp dport map { 10.0.0.1 . 53 : 10.1.0.2 . 5353 } persistent
+  }
+}
+table inet w {
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    meta l4proto tcp tproxy ip6 to [fd00::5]:80
+    meta l4proto tcp tproxy ip6 to [fd00::5]
+  }
+}
+",
+        )],
+    );
+}
+
+#[test]
 fn commands() {
     compare(
         &[

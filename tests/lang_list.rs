@@ -74,3 +74,81 @@ fn extra() {
 fn wiki() {
     check(include_str!("data/wiki.nft"));
 }
+
+#[test]
+fn nat_map_with_port_data() {
+    check(
+        "table ip t {
+  map pm {
+    type ipv4_addr . inet_service : ipv4_addr . inet_service
+    elements = { 10.0.0.1 . 8080 : 10.1.0.2 . 80 }
+  }
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat to ip daddr . tcp dport map { 10.0.0.1 . 8080 : 10.1.0.2 . 80, 10.0.0.1 . 8081 : 10.1.0.3 . 81 }
+    udp dport 1 dnat to ip daddr . udp dport map { 10.0.0.1 . 53 : 10.1.0.2 . 5353 } persistent
+    tcp dport 2 dnat to ip daddr . tcp dport map @pm
+    dnat to ip daddr map { 10.0.0.1 : 10.1.0.2 }
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    snat to ip saddr . tcp sport map { 10.0.0.1 . 8080 : 10.1.0.2 . 80 }
+  }
+}
+table ip6 t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat to ip6 daddr . tcp dport map { fd00::1 . 8080 : fd00:2::2 . 80, fd00::1 . 8081 : fd00:2::3 . 81 }
+    dnat to ip6 daddr map { fd00::1 : fd00:2::2 }
+  }
+}
+table inet t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat ip to ip daddr . tcp dport map { 10.0.0.1 . 8080 : 10.1.0.2 . 80 }
+    dnat ip6 to ip6 daddr . tcp dport map { fd00::1 . 8080 : fd00:2::2 . 80 }
+  }
+}
+",
+    );
+}
+
+#[test]
+fn nat_ip6_brackets() {
+    check(
+        "table ip6 t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    tcp dport 1 dnat to [fd00:2::2]:80
+    tcp dport 2 dnat to [fd00:2::2]:80-90
+    dnat to [fd00:2::2]-[fd00:2::5]
+    tcp dport 4 dnat to [fd00:2::2]-[fd00:2::5]:80
+    dnat to [fd00:2::2]
+    tcp dport 5 redirect to :80
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    tcp dport 1 snat to [fd00:2::2]:80
+    tcp dport 2 snat to [fd00:2::2]-[fd00:2::5]:80
+    snat to fd00:2::2
+    tcp dport 3 masquerade to :80
+  }
+}
+table inet t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    tcp dport 1 dnat ip6 to [fd00:2::2]:80
+    tcp dport 2 dnat ip to 1.2.3.4:80
+    dnat ip6 to fd00:2::2
+  }
+  chain mangle {
+    type filter hook prerouting priority mangle; policy accept;
+    meta l4proto tcp tproxy ip6 to [fd00::5]:80
+    meta l4proto tcp tproxy ip6 to [fd00::5]
+    meta l4proto tcp tproxy ip to 1.2.3.4:80
+    meta l4proto tcp tproxy ip6 to :80
+  }
+}
+",
+    );
+}

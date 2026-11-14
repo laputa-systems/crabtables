@@ -359,3 +359,58 @@ fn exthdr_and_hash_single_keys() {
         ));
     }
 }
+
+#[test]
+fn nat_map_with_port_data() {
+    check(
+        "table ip t {
+  map pm {
+    type ipv4_addr . inet_service : ipv4_addr . inet_service
+    elements = { 10.0.0.1 . 8080 : 10.1.0.2 . 80 }
+  }
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat to ip daddr . tcp dport map { 10.0.0.1 . 8080 : 10.1.0.2 . 80, 10.0.0.1 . 8081 : 10.1.0.3 . 81 }
+    udp dport 1 dnat to ip daddr . udp dport map { 10.0.0.1 . 53 : 10.1.0.2 . 5353 } persistent
+    tcp dport 2 dnat to ip daddr . tcp dport map @pm
+    dnat to ip daddr map { 10.0.0.1 : 10.1.0.2 }
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    snat to ip saddr . tcp sport map { 10.0.0.1 . 8080 : 10.1.0.2 . 80 }
+  }
+}
+table ip6 t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat to ip6 daddr . tcp dport map { fd00::1 . 8080 : fd00:2::2 . 80, fd00::1 . 8081 : fd00:2::3 . 81 }
+    dnat to ip6 daddr map { fd00::1 : fd00:2::2 }
+  }
+}
+table inet t {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    dnat ip to ip daddr . tcp dport map { 10.0.0.1 . 8080 : 10.1.0.2 . 80 }
+    dnat ip6 to ip6 daddr . tcp dport map { fd00::1 . 8080 : fd00:2::2 . 80 }
+  }
+}
+",
+    );
+}
+
+#[test]
+fn single_value_ranges() {
+    check(
+        "table ip t {
+  chain c {
+    type filter hook input priority filter; policy accept;
+    meta mark 100-100 counter
+    meta mark != 100-100
+    meta mark { 5-5, 7-9 }
+    tcp dport 80-80
+    ip saddr 10.0.0.1-10.0.0.1
+  }
+}
+",
+    );
+}
