@@ -30,4 +30,4 @@ the commands without checking prerequisites or writing results.
 Runs write logs and a summary under `.work/bench/`. A completed run is not a performance
 verdict. The summary marks host readiness unestablished; use a quiet host or paired
 busy-host evidence before comparing results. Packet throughput, tail latency, CPU and
-memory attribution remain unmeasured; see DSLP-13.
+memory attribution remain unmeasured; see CRAB-19.
