@@ -1,22 +1,15 @@
 Prefix: DSLP
-Next: 10
+Next: 12
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
 
-Ground: OrbStack Linux 7.2.12 aarch64's no-fail-fast suite reports 237 passed and the same 16 failures as admission revision 76765cf (102.25s warm). Failures include lost responses (DSLP-6), unavailable nft dup/fwd operations (DSLP-7), and a monitor mismatch (DSLP-8). A retry added an owned-table teardown failure (DSLP-9); ten isolated admission runs passed. Parent disposition: these 16 failures are host-kernel limitations; hosted CI is authoritative and the parent will check the PR's kernel job. Linux `make lint` passed in 5.27s. Diagnose, Types, Tests, Dead code, Bench, findings, and the final review have not been run.
+Ground: OrbStack Linux 7.2.12 aarch64's no-fail-fast suite reports 237 passed and the same 16 failures as admission revision 76765cf (102.25s warm). Failures include lost responses (DSLP-6), unavailable nft dup/fwd operations (DSLP-7), and a monitor mismatch (DSLP-8). A retry added an owned-table teardown failure (DSLP-9); ten isolated admission runs passed. Parent disposition: these 16 failures are host-kernel limitations; hosted CI is authoritative and the parent will check the PR's kernel job. Linux `make lint` passed in 5.27s.
+
+Diagnose: qualification evidence recorded a failed Git lookup as its revision and still reported qualified (DSLP-10). Corrected the README's stale qualification statement. Local suite: 103.08s, the same 16 failures as admission; lint: 1.41s. Hosted CI minutes: not run locally.
 
 ## Tickets
-
-### DSLP-2 · P2 · Diagnose: ultrareview into this backlog
-
-- **Area:** deslop · diagnose
-- **Where:** whole repository (our changes against upstream)
-- **Problem:** No review has ranked this repository's risks for the deslop pass.
-- **Recommendation:** Run the deslop Diagnose step. Accept: the diff touches only docs, comments, and this file, and every finding names its Fix with.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-3 · P2 · Types: strict profile and typing findings
 
@@ -43,6 +36,15 @@ Ground: OrbStack Linux 7.2.12 aarch64's no-fail-fast suite reports 237 passed an
 - **Problem:** No dead-code scan has run.
 - **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
 - **Fix with:** deslop
+- **Effort:** M
+
+### DSLP-10 · P2 · Reject missing qualification revision instead of recording git errors
+
+- **Area:** Qualification evidence
+- **Where:** tests/common/qualify.rs:2271, tests/common/qualify.rs:2233, cli/tests/qualify.rs:2589
+- **Problem:** A completed run in a container with an inaccessible Git worktree recorded crabtables_revision as 'fatal: not a git repository: ...' while summary.qualified was true. The revision command returns error text without checking its exit status, so an unidentifiable build can be reported as qualified despite the qualification contract requiring a revision.
+- **Recommendation:** Require a valid revision or an explicit valid QUALIFY_REVISION override, fail qualification when it is unavailable, and add a regression proving a failed git lookup cannot produce qualified evidence.
+- **Fix with:** error-model
 - **Effort:** M
 
 ### DSLP-6 · P3 · Investigate huge batch response loss on OrbStack kernel
@@ -79,5 +81,14 @@ Ground: OrbStack Linux 7.2.12 aarch64's no-fail-fast suite reports 237 passed an
 - **Problem:** The second OrbStack Linux 7.2.12 full-suite run failed owner_table_disappears_with_socket because the table remained after its socket closed. The first candidate and admission full runs passed; ten isolated admission runs passed. Pre-existence and cause remain unproven.
 - **Recommendation:** Reproduce the failure under load and distinguish delayed kernel teardown from a product defect before changing the test or socket behavior.
 - **Fix with:** root-cause
+- **Effort:** M
+
+### DSLP-11 · P3 · Investigate qualification watchdog pid reuse race
+
+- **Area:** Qualification process lifecycle
+- **Where:** tests/common/qualify.rs:556
+- **Problem:** The watchdog signals a numeric child PID after a timeout, while wait_with_output reaps the child before the done sender is dropped. If the timeout falls between those events and the PID is reused, the signal can target a different process. This ordering risk has not been reproduced.
+- **Recommendation:** Prove or exclude the race and use child-owned timeout and cleanup that cannot signal a reused PID.
+- **Fix with:** lifecycle-concurrency
 - **Effort:** M
 
