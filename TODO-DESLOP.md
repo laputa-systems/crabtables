@@ -5,6 +5,8 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+Scorecard (admission 76765cf to this pass): Rust production lines 35,471 → 35,494; Rust test lines 15,335 → 15,387, plus one Python test. Escape-hatch occurrences in `src`, `cli/src` and `examples` stayed at 197. No dead code or dependencies were removed. Warm local `make test` was 102.25s at Ground and 111.35s at DSLP-14; host load makes a performance comparison inconclusive. Line and branch coverage, and automated caught/missed/timeout/unviable mutant counts, need environment: cargo-llvm-cov and cargo-mutants are unavailable and not mirrored. Six hand-injected boundary faults were caught. Findings filed: two P2, both fixed; six P3 remain open. One selector regression introduced during this pass was caught and fixed before handoff; escaped regressions after handoff are unknown.
+
 Ground: OrbStack Linux 7.2.12 aarch64's no-fail-fast suite reports 237 passed and the same 16 failures as admission revision 76765cf (102.25s warm). Failures include lost responses (DSLP-6), unavailable nft dup/fwd operations (DSLP-7), and a monitor mismatch (DSLP-8). A retry added an owned-table teardown failure (DSLP-9); ten isolated admission runs passed. Parent disposition: these 16 failures are host-kernel limitations; hosted CI is authoritative and the parent will check the PR's kernel job. Linux `make lint` passed in 5.27s.
 
 Diagnose: qualification evidence recorded a failed Git lookup as its revision and still reported qualified (DSLP-10). Corrected the README's stale qualification statement. Local suite: 103.08s, the same 16 failures as admission; lint: 1.41s. Hosted CI minutes: not run locally.
@@ -20,6 +22,12 @@ Bench: the existing Full workload compares loading and listing large sets and ru
 DSLP-10: failed Git revision lookup now prevents qualification; the existing explicit override remains supported. A regression failed before the fix and passed after it. Local suite: 124.61s, 238 passed and the same 16 failures as admission; lint: 1.87s. The container run supplied the worktree's pre-commit revision because its Git metadata is inaccessible. CI minutes: not run locally.
 
 DSLP-14: explicitly requested benchmark workloads now fail selection if tier, area or skip excludes them. The regression failed before the fix and passes through `make test`. Local suite: 111.35s, 238 Rust tests passed and the same 16 failures as admission, plus one Python test passed; lint: 0.39s. CI minutes: not run locally.
+
+Review: the cumulative pass was checked against e2762c2. The selector false pass became DSLP-14, Python test discovery now avoids writing bytecode into the worktree, and the benchmark propagates errors without new escape hatches. No other demonstrated finding remains open at P1 or P2.
+
+Method feedback: a selection test must include explicitly requested workloads above the tier ceiling, not just unknown names and empty results. `mdtool` treated quoted Make variable values as target names. The dead-code scan established no safe removal.
+
+Shared-file gaps: the deslop tools reference assumes cargo-llvm-cov, cargo-mutants and dead-code tools can be provisioned; this lane's owner ruling defers the unavailable tools and prohibits installing the first two. No shared file was changed. Needs environment: the parent must confirm the PR's hosted kernel integration job and the performance evidence described above.
 
 ## Tickets
 

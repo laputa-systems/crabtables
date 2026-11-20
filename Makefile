@@ -1,7 +1,7 @@
 .PHONY: test lint clean bench bench-list bench-check
 
 test:
-	python3 -m unittest discover -s tests -p test_bench.py
+	python3 -B -m unittest discover -s tests -p test_bench.py
 	cargo test --workspace --all-features --locked $(CARGO_TEST_FLAGS)
 
 lint:
