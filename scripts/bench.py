@@ -33,6 +33,9 @@ def select(tier, names, area, skips):
     chosen = [name for name, w in WORKLOADS.items() if rank[w["tier"]] <= rank[tier]
               and (not names or name in names) and (not area or w["area"] == area)
               and name not in skips]
+    omitted = set(names) - set(chosen)
+    if omitted:
+        raise ValueError("requested workload excluded by tier, area, or skip: " + ", ".join(sorted(omitted)))
     if tier != "edit" and not chosen:
         raise ValueError("selection matches no workloads")
     return chosen

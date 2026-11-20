@@ -19,16 +19,9 @@ Bench: the existing Full workload compares loading and listing large sets and ru
 
 DSLP-10: failed Git revision lookup now prevents qualification; the existing explicit override remains supported. A regression failed before the fix and passed after it. Local suite: 124.61s, 238 passed and the same 16 failures as admission; lint: 1.87s. The container run supplied the worktree's pre-commit revision because its Git metadata is inaccessible. CI minutes: not run locally.
 
+DSLP-14: explicitly requested benchmark workloads now fail selection if tier, area or skip excludes them. The regression failed before the fix and passes through `make test`. Local suite: 111.35s, 238 Rust tests passed and the same 16 failures as admission, plus one Python test passed; lint: 0.39s. CI minutes: not run locally.
+
 ## Tickets
-
-### DSLP-14 · P2 · Reject explicit benchmark workloads above the tier ceiling
-
-- **Area:** Benchmark selection
-- **Where:** scripts/bench.py:select
-- **Problem:** make bench BENCH_ARGS='--tier edit --workload transaction' exits 0 after running only the selector self-test. The explicitly requested transaction workload is silently omitted because it exceeds the tier ceiling; mixed selections can also omit an explicitly requested workload.
-- **Recommendation:** Reject every explicitly named workload that the tier, area, or skip filters exclude, and add a regression that fails on the current false pass.
-- **Fix with:** test-audit
-- **Effort:** S
 
 ### DSLP-6 · P3 · Investigate huge batch response loss on OrbStack kernel
 
