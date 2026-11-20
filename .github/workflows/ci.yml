@@ -50,6 +50,8 @@ jobs:
         run: cargo test --workspace --all-features --no-run
       - name: Run tests
         run: cargo test --workspace --all-features
+      - name: Run local test entry point
+        run: make test
       - name: Benchmark against nft
         run: |
           cargo build --release -p nfcrt

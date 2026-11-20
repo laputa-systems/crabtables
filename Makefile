@@ -1,4 +1,7 @@
-.PHONY: lint clean
+.PHONY: test lint clean
+
+test:
+	cargo test --workspace --all-features --locked $(CARGO_TEST_FLAGS)
 
 lint:
 	cargo clippy --workspace --all-targets --locked
