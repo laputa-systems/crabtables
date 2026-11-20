@@ -49,8 +49,6 @@ jobs:
       - name: Build tests
         run: cargo test --workspace --all-features --no-run
       - name: Run tests
-        run: cargo test --workspace --all-features
-      - name: Run local test entry point
         run: make test
       - name: Benchmark against nft
         run: |
