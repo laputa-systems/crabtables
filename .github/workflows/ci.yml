@@ -49,7 +49,7 @@ jobs:
       - name: Build tests
         run: cargo test --workspace --all-features --no-run
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: make test
       - name: Benchmark against nft
         run: |
           cargo build --release -p nfcrt

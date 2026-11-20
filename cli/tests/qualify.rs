@@ -2587,6 +2587,9 @@ fn parallel(cases: &[Case], fault: Option<Fault>, filter: &[String]) -> Vec<Case
 
 #[test]
 fn qualification() {
+    if let Err(error) = qualification_revision() {
+        panic!("qualification requires an identifiable revision: {error}");
+    }
     let cases = all_cases();
     let fault = std::env::var("QUALIFY_FAULT").ok().map(|s| {
         Fault::parse(&s).unwrap_or_else(|| panic!("unknown QUALIFY_FAULT {s}"))
@@ -2674,6 +2677,35 @@ fn synthetic(id: &str, status: Status, marker: Marker) -> CaseResult {
 }
 
 const WHY: &str = "nft evaluates this command against a cache that exists in neither the old nor the new ruleset, so nfcrt deliberately reports the committed state";
+
+#[test]
+fn failed_git_lookup_cannot_qualify() {
+    if std::env::var_os("CRAB_REVISION_TEST_CHILD").is_some() {
+        let rs = vec![synthetic("a", Status::Passed, Marker::None)];
+        let (json, qualified, unmet) = evidence_json(&rs, &[("row", Fam::V4)], &[], true);
+        assert!(!qualified, "failed Git lookup must prevent qualification: {json}");
+        assert!(unmet.iter().any(|item| item.contains("revision")), "{unmet:?}");
+        return;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "failed_git_lookup_cannot_qualify"])
+        .env("CRAB_REVISION_TEST_CHILD", "1")
+        .env_remove("QUALIFY_REVISION")
+        .env("GIT_DIR", "/dev/null")
+        .stdout(std::process::Stdio::piped())
+        .spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("revision regression child timed out");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+}
 
 #[test]
 fn intentional_differences_do_not_block_but_others_do() {

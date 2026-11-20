@@ -61,10 +61,11 @@ The paired qualification suite (`cargo test -p nfcrt --all-features --test quali
 runs the same policies and traffic through `nft`, `nfcrt`, and the typed API in separate
 network-namespace topologies for IPv4 and IPv6, and writes an evidence summary to
 `.work/qualify-evidence.json`. It covers filtering, NAT, conntrack, updates and CLI boundaries; it
-currently reports known divergences from `nft` (the intentional ones are listed separately and do not
-block), so no deployment profile is qualified; see the
+reports intentional divergences from `nft` separately. Qualification applies only to the
+tested kernel and nftables profile; see the
 [differential testing design](https://github.com/laputa-systems/crabtables/blob/main/docs/rfc/CRAB-7-nft-differential-qualification.md)
 for its scope, results, and what remains.
+If Git cannot access the checkout, set `QUALIFY_REVISION` to identify the tested source.
 See [open correctness findings](https://github.com/laputa-systems/crabtables/blob/main/TODO.md)
 before relying on compound expressions or complete-file rollback.
 
@@ -79,6 +80,8 @@ measured with the
 [benchmark harness](https://github.com/laputa-systems/crabtables/blob/main/examples/bench.rs).
 These figures are not a fresh measurement of this fork or evidence of packet-level
 compatibility:
+
+See the [benchmark workload guide](docs/benchmark.md) for bounded local runs.
 
 | operation                 | crabtables (typed) | crabtables (`lang`) | libnftables | `nfcrt` | `nft`  |
 |---------------------------|-------------------:|--------------------:|------------:|--------:|-------:|
