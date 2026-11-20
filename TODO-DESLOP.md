@@ -13,16 +13,9 @@ Types: no strict candidate adopted without a defect witness and an acceptable fa
 
 Tests: fault injections dropping lost-response handling, sentinel failure, rejection handling, and all but the first CLI mutation each failed the corresponding existing boundary test; sources were restored. The qualification false pass is DSLP-10. Needs environment: `cargo-llvm-cov` and `cargo-mutants` are unavailable and not mirrored; line/branch coverage and automated mutant counts are unmeasured, and no unqualified CI lane was added. These four injected faults are bounded witnesses, not a complete mutation sweep. Local suite: 113.07s, same 16 failures as admission; lint: 1.46s. No tests or production behavior were changed, so the suite budget is unaffected apart from host noise. CI minutes: not run locally.
 
+Dead code: rustc `dead_code` on the all-feature library and `dead_code`/`unreachable_pub` on the binary produced no diagnostics. The fork's qualification harness, test utilities and typeof encoding have live test or compiler/decompiler callers; no behavior-preserving cut was established. Removed: 0 lines and 0 dependencies. Needs environment: cargo-machete and cargo-udeps are unavailable. Local suite: 97.34s, same 16 failures as admission; lint: 0.19s. Cargo interleaved one target header with the preceding test output, so its test path was checked against the panic location before comparison. CI minutes: not run locally.
+
 ## Tickets
-
-### DSLP-5 · P2 · Dead code: tools and debloat
-
-- **Area:** deslop · dead code
-- **Where:** whole repository (our changes)
-- **Problem:** No dead-code scan has run.
-- **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-10 · P2 · Reject missing qualification revision instead of recording git errors
 
