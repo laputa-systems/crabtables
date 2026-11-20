@@ -2256,7 +2256,26 @@ fn binary_identity(path: &Path) -> String {
     format!("{{\"path\":{},\"size\":{size},\"sha256\":{}}}", json_str(&path.to_string_lossy()), json_str(&sum))
 }
 
-pub fn profile_json() -> String {
+pub fn qualification_revision() -> Result<String, String> {
+    let revision = match std::env::var("QUALIFY_REVISION") {
+        Ok(revision) => return Ok(revision),
+        Err(_) => {
+            let output = Command::new("git").args(["-c", "safe.directory=*", "rev-parse", "HEAD"])
+                .output().map_err(|e| format!("cannot read Git revision: {e}"))?;
+            if !output.status.success() {
+                return Err(format!("cannot read Git revision: {}", String::from_utf8_lossy(&output.stderr).trim()));
+            }
+            String::from_utf8(output.stdout).map_err(|e| format!("invalid Git revision encoding: {e}"))?
+        }
+    };
+    let revision = revision.trim();
+    if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Git did not return a full object ID".into());
+    }
+    Ok(revision.to_string())
+}
+
+pub fn profile_json(revision: &str) -> String {
     let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_default().trim().to_string();
     let modules: Vec<String> = rd("/proc/modules")
         .lines()
@@ -2268,9 +2287,6 @@ pub fn profile_json() -> String {
         .lines()
         .find_map(|l| l.strip_prefix("PRETTY_NAME=").map(|v| v.trim_matches('"').to_string()))
         .unwrap_or_default();
-    let revision = std::env::var("QUALIFY_REVISION").unwrap_or_else(|_| {
-        cmd_line("git", &["-c", "safe.directory=*", "rev-parse", "HEAD"])
-    });
     let caps = rd("/proc/self/status")
         .lines()
         .find(|l| l.starts_with("CapEff"))
@@ -2292,7 +2308,7 @@ pub fn profile_json() -> String {
             "\"scope\":{{\"families\":[{fams}],\"hooks\":[{hooks}],\"topology\":{topo},",
             "\"excluded\":[{excl}]}}}}"
         ),
-        rev = json_str(&revision),
+        rev = json_str(revision),
         nfv = json_str(&cmd_line(nfcrt(), &["--version"])),
         bp = json_str(if cfg!(debug_assertions) { "debug" } else { "release" }),
         feat = json_str(&std::env::var("QUALIFY_FEATURES").unwrap_or_else(|_| "unrecorded".into())),
@@ -2323,6 +2339,10 @@ pub fn evidence_json(
 ) -> (String, bool, Vec<String>) {
     let count = |s: Status| results.iter().filter(|r| r.status == s).count();
     let mut missing: Vec<String> = Vec::new();
+    let revision = qualification_revision();
+    if let Err(error) = &revision {
+        missing.push(format!("revision: {error}"));
+    }
     for (row, fam) in required {
         let rows: Vec<&CaseResult> = results
             .iter()
@@ -2338,7 +2358,7 @@ pub fn evidence_json(
     }
     let qualified = complete && missing.is_empty();
     let mut s = String::new();
-    let _ = write!(s, "{{\"schema\":2,\"suite\":\"CRAB-7\",\"profile\":{},", profile_json());
+    let _ = write!(s, "{{\"schema\":2,\"suite\":\"CRAB-7\",\"profile\":{},", profile_json(revision.as_deref().unwrap_or("unavailable")));
     let _ = write!(
         s,
         "\"seeds\":{{{}}},",

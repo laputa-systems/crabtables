@@ -65,6 +65,7 @@ reports intentional divergences from `nft` separately. Qualification applies onl
 tested kernel and nftables profile; see the
 [differential testing design](https://github.com/laputa-systems/crabtables/blob/main/docs/rfc/CRAB-7-nft-differential-qualification.md)
 for its scope, results, and what remains.
+If Git cannot access the checkout, set `QUALIFY_REVISION` to identify the tested source.
 See [open correctness findings](https://github.com/laputa-systems/crabtables/blob/main/TODO.md)
 before relying on compound expressions or complete-file rollback.
 

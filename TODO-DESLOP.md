@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 14
+Next: 15
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -17,16 +17,18 @@ Dead code: rustc `dead_code` on the all-feature library and `dead_code`/`unreach
 
 Bench: the existing Full workload compares loading and listing large sets and rules and single transactions, but lacks packet throughput, tail latency, memory and CPU attribution (DSLP-13). A separate Change workload commits and verifies 1,000 rules; Edit checks selection. Both were exercised, including a deliberately missing binary, and Full was not run. Host readiness was not established, so no performance verdict is claimed. The container cannot resolve this worktree's Git revision and recorded it unavailable. Local suite: 134.49s, same 16 failures as admission; lint: 1.61s. Needs environment: a quiet host or paired busy-host evidence for performance comparisons. `mdtool` misclassified quoted Make variable values as targets in the benchmark guide. CI minutes: not run locally.
 
+DSLP-10: failed Git revision lookup now prevents qualification; the existing explicit override remains supported. A regression failed before the fix and passed after it. Local suite: 124.61s, 238 passed and the same 16 failures as admission; lint: 1.87s. The container run supplied the worktree's pre-commit revision because its Git metadata is inaccessible. CI minutes: not run locally.
+
 ## Tickets
 
-### DSLP-10 · P2 · Reject missing qualification revision instead of recording git errors
+### DSLP-14 · P2 · Reject explicit benchmark workloads above the tier ceiling
 
-- **Area:** Qualification evidence
-- **Where:** tests/common/qualify.rs:2271, tests/common/qualify.rs:2233, cli/tests/qualify.rs:2589
-- **Problem:** A completed run in a container with an inaccessible Git worktree recorded crabtables_revision as 'fatal: not a git repository: ...' while summary.qualified was true. The revision command returns error text without checking its exit status, so an unidentifiable build can be reported as qualified despite the qualification contract requiring a revision.
-- **Recommendation:** Require a valid revision or an explicit valid QUALIFY_REVISION override, fail qualification when it is unavailable, and add a regression proving a failed git lookup cannot produce qualified evidence.
-- **Fix with:** error-model
-- **Effort:** M
+- **Area:** Benchmark selection
+- **Where:** scripts/bench.py:select
+- **Problem:** make bench BENCH_ARGS='--tier edit --workload transaction' exits 0 after running only the selector self-test. The explicitly requested transaction workload is silently omitted because it exceeds the tier ceiling; mixed selections can also omit an explicitly requested workload.
+- **Recommendation:** Reject every explicitly named workload that the tier, area, or skip filters exclude, and add a regression that fails on the current false pass.
+- **Fix with:** test-audit
+- **Effort:** S
 
 ### DSLP-6 · P3 · Investigate huge batch response loss on OrbStack kernel
 
@@ -59,7 +61,7 @@ Bench: the existing Full workload compares loading and listing large sets and ru
 
 - **Area:** deslop · verification
 - **Where:** tests/manage.rs:249
-- **Problem:** The second OrbStack Linux 7.2.12 full-suite run failed owner_table_disappears_with_socket because the table remained after its socket closed. The first candidate and admission full runs passed; ten isolated admission runs passed. Pre-existence and cause remain unproven.
+- **Problem:** On OrbStack Linux 7.2.12, owner_table_disappears_with_socket failed in 2 of 10 full-suite runs because the table remained after its socket closed. The admission full run and ten isolated admission runs passed. Pre-existence and cause remain unproven; the parent treats a single occurrence in a run as a host flake.
 - **Recommendation:** Reproduce the failure under load and distinguish delayed kernel teardown from a product defect before changing the test or socket behavior.
 - **Fix with:** root-cause
 - **Effort:** M
