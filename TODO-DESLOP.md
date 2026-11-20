@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 12
+Next: 14
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier E). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -14,6 +14,8 @@ Types: no strict candidate adopted without a defect witness and an acceptable fa
 Tests: fault injections dropping lost-response handling, sentinel failure, rejection handling, and all but the first CLI mutation each failed the corresponding existing boundary test; sources were restored. The qualification false pass is DSLP-10. Needs environment: `cargo-llvm-cov` and `cargo-mutants` are unavailable and not mirrored; line/branch coverage and automated mutant counts are unmeasured, and no unqualified CI lane was added. These four injected faults are bounded witnesses, not a complete mutation sweep. Local suite: 113.07s, same 16 failures as admission; lint: 1.46s. No tests or production behavior were changed, so the suite budget is unaffected apart from host noise. CI minutes: not run locally.
 
 Dead code: rustc `dead_code` on the all-feature library and `dead_code`/`unreachable_pub` on the binary produced no diagnostics. The fork's qualification harness, test utilities and typeof encoding have live test or compiler/decompiler callers; no behavior-preserving cut was established. Removed: 0 lines and 0 dependencies. Needs environment: cargo-machete and cargo-udeps are unavailable. Local suite: 97.34s, same 16 failures as admission; lint: 0.19s. Cargo interleaved one target header with the preceding test output, so its test path was checked against the panic location before comparison. CI minutes: not run locally.
+
+Bench: the existing Full workload compares loading and listing large sets and rules and single transactions, but lacks packet throughput, tail latency, memory and CPU attribution (DSLP-13). A separate Change workload commits and verifies 1,000 rules; Edit checks selection. Both were exercised, including a deliberately missing binary, and Full was not run. Host readiness was not established, so no performance verdict is claimed. The container cannot resolve this worktree's Git revision and recorded it unavailable. Local suite: 134.49s, same 16 failures as admission; lint: 1.61s. Needs environment: a quiet host or paired busy-host evidence for performance comparisons. `mdtool` misclassified quoted Make variable values as targets in the benchmark guide. CI minutes: not run locally.
 
 ## Tickets
 
@@ -69,5 +71,14 @@ Dead code: rustc `dead_code` on the all-feature library and `dead_code`/`unreach
 - **Problem:** The watchdog signals a numeric child PID after a timeout, while wait_with_output reaps the child before the done sender is dropped. If the timeout falls between those events and the PID is reused, the signal can target a different process. This ordering risk has not been reproduced.
 - **Recommendation:** Prove or exclude the race and use child-owned timeout and cleanup that cannot signal a reused PID.
 - **Fix with:** lifecycle-concurrency
+- **Effort:** M
+
+### DSLP-13 · P3 · Measure packet workload and resource costs
+
+- **Area:** deslop · bench
+- **Where:** examples/bench.rs, examples/bench_change.rs
+- **Problem:** The benchmarks cover rule and set loading, listing, and transaction latency, but do not measure packet throughput or tail latency, CPU per packet, memory, or attribution for realistic traffic. The upstream benchmark reports three-run medians without interleaved baseline comparison or a performance gate.
+- **Recommendation:** Add a representative packet workload with correctness and completed-work checks, paired baseline measurements, and CPU and memory attribution before using it to make performance claims.
+- **Fix with:** bench-pyramid
 - **Effort:** M
 

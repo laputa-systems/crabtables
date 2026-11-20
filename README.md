@@ -80,6 +80,8 @@ measured with the
 These figures are not a fresh measurement of this fork or evidence of packet-level
 compatibility:
 
+See the [benchmark workload guide](docs/benchmark.md) for bounded local runs.
+
 | operation                 | crabtables (typed) | crabtables (`lang`) | libnftables | `nfcrt` | `nft`  |
 |---------------------------|-------------------:|--------------------:|------------:|--------:|-------:|
 | load 200 000 set elements |             283 ms |              471 ms |      754 ms |  608 ms | 917 ms |
