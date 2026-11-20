@@ -11,16 +11,9 @@ Diagnose: qualification evidence recorded a failed Git lookup as its revision an
 
 Types: no strict candidate adopted without a defect witness and an acceptable false-positive rate. On all-feature library and binary targets, wildcard enum match reported 139 diagnostics, single-variant wildcard 5, truncating casts 108, sign loss 10, unwrap 49, expect 0, redundant clone 5, and needless pass-by-value 8; forbidding unsafe failed on existing FFI and async registration. These are discovery counts, not proven defects. Production Rust escape-hatch occurrences: 164 before and after. Local suite: 120.44s, same 16 failures as admission; lint: 0.24s. CI minutes: not run locally.
 
+Tests: fault injections dropping lost-response handling, sentinel failure, rejection handling, and all but the first CLI mutation each failed the corresponding existing boundary test; sources were restored. The qualification false pass is DSLP-10. Needs environment: `cargo-llvm-cov` and `cargo-mutants` are unavailable and not mirrored; line/branch coverage and automated mutant counts are unmeasured, and no unqualified CI lane was added. These four injected faults are bounded witnesses, not a complete mutation sweep. Local suite: 113.07s, same 16 failures as admission; lint: 1.46s. No tests or production behavior were changed, so the suite budget is unaffected apart from host noise. CI minutes: not run locally.
+
 ## Tickets
-
-### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
-
-- **Area:** deslop · tests
-- **Where:** test suites and CI
-- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists.
-- **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
-- **Fix with:** deslop
-- **Effort:** L
 
 ### DSLP-5 · P2 · Dead code: tools and debloat
 

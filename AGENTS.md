@@ -9,3 +9,4 @@
 - Public Rust API and netlink format: `cargo test --workspace --all-features`; language and nft JSON formats: `cargo test --features lang_json --test lang_compile --test lang_list --test lang_json`.
 - Performance workload: `examples/bench.rs` compares rule and set loading/listing and transactions; it requires a privileged Linux host, nft and libnftables. Consumer `ctrs` requires separate tests for API changes.
 - Admission local full test: 102.25s warm, 237 passed and 16 host failures; lint: 5.27s. No vendored tree was found.
+- Test tiers: Edit `cargo test --lib --all-features batch::tests` checks batch outcome classification; Change `cargo test -p nfcrt --test compat query_between_mutations_is_one_transaction` checks rollback across a query. Their isolated costs are seconds. Full `make test` includes packet qualification (about 60s observed for qualification alone) and needs the kernel environment above.
