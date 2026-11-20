@@ -9,16 +9,9 @@ Ground: OrbStack Linux 7.2.12 aarch64's no-fail-fast suite reports 237 passed an
 
 Diagnose: qualification evidence recorded a failed Git lookup as its revision and still reported qualified (DSLP-10). Corrected the README's stale qualification statement. Local suite: 103.08s, the same 16 failures as admission; lint: 1.41s. Hosted CI minutes: not run locally.
 
+Types: no strict candidate adopted without a defect witness and an acceptable false-positive rate. On all-feature library and binary targets, wildcard enum match reported 139 diagnostics, single-variant wildcard 5, truncating casts 108, sign loss 10, unwrap 49, expect 0, redundant clone 5, and needless pass-by-value 8; forbidding unsafe failed on existing FFI and async registration. These are discovery counts, not proven defects. Production Rust escape-hatch occurrences: 164 before and after. Local suite: 120.44s, same 16 failures as admission; lint: 0.24s. CI minutes: not run locally.
+
 ## Tickets
-
-### DSLP-3 · P2 · Types: strict profile and typing findings
-
-- **Area:** deslop · types
-- **Where:** type checker and lint configuration; Rust/Python sources
-- **Problem:** The strict-profile candidates in the deslop skill's tools reference have not been measured here.
-- **Recommendation:** Run the deslop Types step. Accept: clean at the adopted profile, escape hatches not increased, witnesses recorded.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
 
