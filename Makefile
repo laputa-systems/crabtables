@@ -18,3 +18,7 @@ bench-check:
 
 clean:
 	find . -path './.git' -prune -o -path './.work' -prune -o -name target -type d -prune -exec rm -rf {} +
+
+.PHONY: test-ci
+test-ci: test
+	python3 scripts/check-constants.py
