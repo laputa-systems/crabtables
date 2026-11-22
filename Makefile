@@ -1,8 +1,15 @@
-.PHONY: test lint clean bench bench-list bench-check
+.PHONY: test test-ci test-harness lint clean bench bench-list bench-check
 
-test:
+test: test-harness
+	cargo test --workspace --all-features --locked --lib --bins -- \
+	    --skip asynchronous::tests::faulty_responses --skip socket::tests::faulty_responses
+
+test-harness:
 	python3 -B -m unittest discover -s tests -p test_bench.py
+
+test-ci: test-harness
 	cargo test --workspace --all-features --locked $(CARGO_TEST_FLAGS)
+	python3 scripts/check-constants.py
 
 lint:
 	cargo clippy --workspace --all-targets --locked
@@ -21,7 +28,3 @@ clean:
 	  printf '%s\n' 'make clean: ./target must be a local build directory' >&2; exit 1; \
 	fi
 	rm -rf -- ./target
-
-.PHONY: test-ci
-test-ci: test
-	python3 scripts/check-constants.py
